@@ -76,10 +76,10 @@ enum StaleVerdict {
 /// Parse the `pid=<N>` line out of a lockfile body.
 fn parse_lock_pid(contents: &str) -> Option<u32> {
     for line in contents.lines() {
-        if let Some(rest) = line.strip_prefix("pid=")
-            && let Ok(pid) = rest.trim().parse::<u32>()
-        {
-            return Some(pid);
+        if let Some(rest) = line.strip_prefix("pid=") {
+            if let Ok(pid) = rest.trim().parse::<u32>() {
+                return Some(pid);
+            }
         }
     }
     None
@@ -131,13 +131,14 @@ fn classify_existing_lock(path: &Path, contents: &str) -> StaleVerdict {
     // PID-alive path: as a cross-platform fallback (and a backstop for
     // exotic cases like PID reuse on long-running hosts), also treat any
     // lockfile older than the configured threshold as stale.
-    if let Ok(meta) = fs::metadata(path)
-        && let Ok(modified) = meta.modified()
-        && let Ok(age) = modified.elapsed()
-    {
-        let age_secs = age.as_secs();
-        if age_secs > STALE_LOCK_MAX_AGE_SECS {
-            return StaleVerdict::TooOld { age_secs };
+    if let Ok(meta) = fs::metadata(path) {
+        if let Ok(modified) = meta.modified() {
+            if let Ok(age) = modified.elapsed() {
+                let age_secs = age.as_secs();
+                if age_secs > STALE_LOCK_MAX_AGE_SECS {
+                    return StaleVerdict::TooOld { age_secs };
+                }
+            }
         }
     }
 
@@ -147,7 +148,11 @@ fn classify_existing_lock(path: &Path, contents: &str) -> StaleVerdict {
 impl SyncLock {
     fn acquire(state_dir: &Path) -> Result<Self> {
         let path = state_dir.join("sync.lock");
-        let lock_content = format!("pid={}\nstarted_at={}\n", std::process::id(), now_rfc3339());
+        let lock_content = format!(
+            "pid={}\nstarted_at={}\n",
+            std::process::id(),
+            now_rfc3339()
+        );
         // Single retry: if the first create_new fails because the lockfile
         // already exists, inspect it. If we can prove it's stale (dead PID,
         // malformed, or too old), remove it and try once more. We never loop
@@ -161,9 +166,8 @@ impl SyncLock {
             {
                 Ok(mut file) => {
                     use std::io::Write;
-                    file.write_all(lock_content.as_bytes()).with_context(|| {
-                        format!("kan lockfile niet schrijven: {}", path.display())
-                    })?;
+                    file.write_all(lock_content.as_bytes())
+                        .with_context(|| format!("kan lockfile niet schrijven: {}", path.display()))?;
                     return Ok(Self { path });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -199,10 +203,7 @@ impl SyncLock {
                             let _ = fs::remove_file(&path);
                         }
                         StaleVerdict::Active => {
-                            anyhow::bail!(
-                                "sync is al actief (lockfile bestaat): {}",
-                                path.display()
-                            );
+                            anyhow::bail!("sync is al actief (lockfile bestaat): {}", path.display());
                         }
                     }
                 }
@@ -3726,10 +3727,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("sync.lock");
-        let body = format!(
-            "pid={}\nstarted_at=2026-06-06T13:29:25Z\n",
-            definitely_dead_pid
-        );
+        let body = format!("pid={}\nstarted_at=2026-06-06T13:29:25Z\n", definitely_dead_pid);
         fs::write(&path, &body).unwrap();
 
         assert_eq!(
@@ -3769,20 +3767,13 @@ mod tests {
 
         // Pre-stage a stale lockfile from a definitely-not-running PID.
         let dead_pid: u32 = (i32::MAX as u32) - 7;
-        assert!(
-            !pid_alive(dead_pid),
-            "precondition: pid {} must not exist",
-            dead_pid
-        );
+        assert!(!pid_alive(dead_pid), "precondition: pid {} must not exist", dead_pid);
         fs::write(
             &lock_path,
             format!("pid={}\nstarted_at=2026-06-06T13:29:25Z\n", dead_pid),
         )
         .unwrap();
-        assert!(
-            lock_path.exists(),
-            "precondition: stale lock should be on disk"
-        );
+        assert!(lock_path.exists(), "precondition: stale lock should be on disk");
 
         // Acquire must succeed despite the pre-existing file.
         let lock = SyncLock::acquire(state_dir).expect("should take over stale lock");
