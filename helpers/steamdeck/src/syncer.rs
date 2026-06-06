@@ -52,31 +52,158 @@ struct SyncLock {
     path: PathBuf,
 }
 
+/// Maximum lockfile age before we treat it as stale even if we can't verify
+/// PID liveness (Windows fallback, or any platform where the recorded PID
+/// can't be parsed). A normal sync finishes in seconds; six hours is a wide
+/// safety margin so we don't yank a long-running sync, while still recovering
+/// from a stuck lockfile within the same day.
+const STALE_LOCK_MAX_AGE_SECS: u64 = 6 * 60 * 60;
+
+/// Verdict on whether an existing lockfile is "stale" (safe to take over) or
+/// "active" (must bail). Carries a human-readable reason for the warning log.
+#[derive(Debug, PartialEq, Eq)]
+enum StaleVerdict {
+    /// Recorded PID is no longer alive on this system.
+    DeadPid(u32),
+    /// Lockfile content couldn't be parsed as our format.
+    Malformed,
+    /// Lockfile is older than `STALE_LOCK_MAX_AGE_SECS` (cross-platform fallback).
+    TooOld { age_secs: u64 },
+    /// Lockfile looks like an active sync — caller must bail.
+    Active,
+}
+
+/// Parse the `pid=<N>` line out of a lockfile body.
+fn parse_lock_pid(contents: &str) -> Option<u32> {
+    for line in contents.lines() {
+        if let Some(rest) = line.strip_prefix("pid=") {
+            if let Ok(pid) = rest.trim().parse::<u32>() {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
+/// Best-effort check of whether `pid` corresponds to a running process on
+/// this host. On Unix this uses `kill(pid, 0)` which doesn't deliver a
+/// signal — it only validates that the kernel has a process with that pid
+/// reachable to us. On Windows we return `true` ("conservatively alive")
+/// and rely on the age-based fallback to recover from stuck locks.
+fn pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: `libc::kill` with signum 0 performs only existence-check;
+        // it has no side effects on the target process.
+        let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if r == 0 {
+            return true;
+        }
+        // Distinguish "no such process" (ESRCH) from "permission denied" (EPERM).
+        // EPERM means the pid IS alive but is owned by a different uid — treat
+        // as alive so we don't take over another user's lock.
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        errno != Some(libc::ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+/// Decide whether an existing `sync.lock` at `path` (with the given on-disk
+/// contents) should be treated as stale. See `StaleVerdict` for the cases.
+fn classify_existing_lock(path: &Path, contents: &str) -> StaleVerdict {
+    match parse_lock_pid(contents) {
+        Some(pid) => {
+            if !pid_alive(pid) {
+                return StaleVerdict::DeadPid(pid);
+            }
+        }
+        None => return StaleVerdict::Malformed,
+    }
+
+    if let Ok(meta) = fs::metadata(path) {
+        if let Ok(modified) = meta.modified() {
+            if let Ok(age) = modified.elapsed() {
+                let age_secs = age.as_secs();
+                if age_secs > STALE_LOCK_MAX_AGE_SECS {
+                    return StaleVerdict::TooOld { age_secs };
+                }
+            }
+        }
+    }
+
+    StaleVerdict::Active
+}
+
 impl SyncLock {
     fn acquire(state_dir: &Path) -> Result<Self> {
         let path = state_dir.join("sync.lock");
         let lock_content = format!(
-            "pid={}\\nstarted_at={}\\n",
+            "pid={}\nstarted_at={}\n",
             std::process::id(),
             now_rfc3339()
         );
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                use std::io::Write;
-                file.write_all(lock_content.as_bytes())
-                    .with_context(|| format!("kan lockfile niet schrijven: {}", path.display()))?;
-                Ok(Self { path })
+        // Single recovery retry — see helpers/mister/src/syncer.rs for the
+        // detailed write-up; same logic mirrored here so the steamdeck helper
+        // gets the same stale-lock recovery behavior.
+        for attempt in 0..2 {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    file.write_all(lock_content.as_bytes())
+                        .with_context(|| format!("kan lockfile niet schrijven: {}", path.display()))?;
+                    return Ok(Self { path });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if attempt == 1 {
+                        anyhow::bail!("sync is al actief (lockfile bestaat): {}", path.display());
+                    }
+                    let existing = fs::read_to_string(&path).unwrap_or_default();
+                    match classify_existing_lock(&path, &existing) {
+                        StaleVerdict::DeadPid(pid) => {
+                            eprintln!(
+                                "waarschuwing: oude sync.lock van pid={} verwijderd (proces draait niet meer): {}",
+                                pid,
+                                path.display()
+                            );
+                            let _ = fs::remove_file(&path);
+                        }
+                        StaleVerdict::Malformed => {
+                            eprintln!(
+                                "waarschuwing: oude sync.lock met onleesbare inhoud verwijderd: {}",
+                                path.display()
+                            );
+                            let _ = fs::remove_file(&path);
+                        }
+                        StaleVerdict::TooOld { age_secs } => {
+                            eprintln!(
+                                "waarschuwing: oude sync.lock ({}s oud, drempel {}s) verwijderd: {}",
+                                age_secs,
+                                STALE_LOCK_MAX_AGE_SECS,
+                                path.display()
+                            );
+                            let _ = fs::remove_file(&path);
+                        }
+                        StaleVerdict::Active => {
+                            anyhow::bail!("sync is al actief (lockfile bestaat): {}", path.display());
+                        }
+                    }
+                }
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!("kan sync lockfile niet maken: {}", path.display())
+                    });
+                }
             }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                anyhow::bail!("sync is al actief (lockfile bestaat): {}", path.display());
-            }
-            Err(err) => Err(err)
-                .with_context(|| format!("kan sync lockfile niet maken: {}", path.display())),
         }
+        unreachable!("SyncLock::acquire loop should always exit via return or bail");
     }
 }
 
@@ -3901,5 +4028,91 @@ mod tests {
             dreamcast_line_key("dreamcast", "retroarch", "A2"),
             "dc-line:dreamcast:retroarch:a2"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Stale sync.lock recovery tests (mirrors helpers/mister/src/syncer.rs).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parse_lock_pid_reads_pid_line() {
+        let body = "pid=19199\nstarted_at=2026-06-06T13:29:25Z\n";
+        assert_eq!(parse_lock_pid(body), Some(19199));
+    }
+
+    #[test]
+    fn parse_lock_pid_handles_missing_or_garbage() {
+        assert_eq!(parse_lock_pid(""), None);
+        assert_eq!(parse_lock_pid("started_at=2026-06-06T13:29:25Z\n"), None);
+        assert_eq!(parse_lock_pid("pid=not-a-number\n"), None);
+        assert_eq!(parse_lock_pid("pid=42  \nstarted_at=x\n"), Some(42));
+    }
+
+    #[test]
+    fn classify_existing_lock_dead_pid() {
+        let definitely_dead_pid: u32 = (i32::MAX as u32) - 7;
+        assert!(!pid_alive(definitely_dead_pid));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sync.lock");
+        let body = format!("pid={}\nstarted_at=2026-06-06T13:29:25Z\n", definitely_dead_pid);
+        fs::write(&path, &body).unwrap();
+
+        assert_eq!(
+            classify_existing_lock(&path, &body),
+            StaleVerdict::DeadPid(definitely_dead_pid)
+        );
+    }
+
+    #[test]
+    fn classify_existing_lock_malformed_treated_as_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sync.lock");
+        let body = "this is not what we ever write";
+        fs::write(&path, body).unwrap();
+        assert_eq!(classify_existing_lock(&path, body), StaleVerdict::Malformed);
+    }
+
+    #[test]
+    fn classify_existing_lock_live_pid_active() {
+        let pid = std::process::id();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sync.lock");
+        let body = format!("pid={}\nstarted_at=2026-06-06T13:29:25Z\n", pid);
+        fs::write(&path, &body).unwrap();
+        assert_eq!(classify_existing_lock(&path, &body), StaleVerdict::Active);
+    }
+
+    #[test]
+    fn acquire_takes_over_dead_pid_lock_and_cleans_up_on_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let lock_path = state_dir.join("sync.lock");
+
+        let dead_pid: u32 = (i32::MAX as u32) - 7;
+        assert!(!pid_alive(dead_pid));
+        fs::write(
+            &lock_path,
+            format!("pid={}\nstarted_at=2026-06-06T13:29:25Z\n", dead_pid),
+        )
+        .unwrap();
+        assert!(lock_path.exists());
+
+        let lock = SyncLock::acquire(state_dir).expect("should take over stale lock");
+
+        let contents = fs::read_to_string(&lock_path).unwrap();
+        assert_eq!(parse_lock_pid(&contents), Some(std::process::id()));
+
+        drop(lock);
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn acquire_refuses_when_lock_is_actively_held_by_live_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let _held = SyncLock::acquire(state_dir).expect("first acquire");
+        let err = SyncLock::acquire(state_dir).expect_err("second acquire should bail");
+        assert!(format!("{err}").contains("sync is al actief"));
     }
 }
