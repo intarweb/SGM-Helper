@@ -21,6 +21,13 @@ sha2 = "0.10"
 time = { version = "0.3", features = ["formatting", "macros"] }
 walkdir = "2.5"
 
+# Unix-only: PID liveness check (kill(pid, 0)) for stale-lockfile recovery
+# in syncer::pid_alive. Windows builds get a conservative "treat as alive"
+# default and rely on the cross-platform 6h-age fallback to recover stuck
+# locks; no Windows-specific dep is needed.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 assert_cmd = "2.0"
 httpmock = "0.8"
