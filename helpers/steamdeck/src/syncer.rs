@@ -141,11 +141,7 @@ fn classify_existing_lock(path: &Path, contents: &str) -> StaleVerdict {
 impl SyncLock {
     fn acquire(state_dir: &Path) -> Result<Self> {
         let path = state_dir.join("sync.lock");
-        let lock_content = format!(
-            "pid={}\nstarted_at={}\n",
-            std::process::id(),
-            now_rfc3339()
-        );
+        let lock_content = format!("pid={}\nstarted_at={}\n", std::process::id(), now_rfc3339());
         // Single recovery retry — see helpers/mister/src/syncer.rs for the
         // detailed write-up; same logic mirrored here so the steamdeck helper
         // gets the same stale-lock recovery behavior.
@@ -157,8 +153,9 @@ impl SyncLock {
             {
                 Ok(mut file) => {
                     use std::io::Write;
-                    file.write_all(lock_content.as_bytes())
-                        .with_context(|| format!("kan lockfile niet schrijven: {}", path.display()))?;
+                    file.write_all(lock_content.as_bytes()).with_context(|| {
+                        format!("kan lockfile niet schrijven: {}", path.display())
+                    })?;
                     return Ok(Self { path });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -192,7 +189,10 @@ impl SyncLock {
                             let _ = fs::remove_file(&path);
                         }
                         StaleVerdict::Active => {
-                            anyhow::bail!("sync is al actief (lockfile bestaat): {}", path.display());
+                            anyhow::bail!(
+                                "sync is al actief (lockfile bestaat): {}",
+                                path.display()
+                            );
                         }
                     }
                 }
@@ -4055,7 +4055,10 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("sync.lock");
-        let body = format!("pid={}\nstarted_at=2026-06-06T13:29:25Z\n", definitely_dead_pid);
+        let body = format!(
+            "pid={}\nstarted_at=2026-06-06T13:29:25Z\n",
+            definitely_dead_pid
+        );
         fs::write(&path, &body).unwrap();
 
         assert_eq!(
