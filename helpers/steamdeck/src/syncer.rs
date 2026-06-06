@@ -48,6 +48,7 @@ struct ProcessedEntry {
     entry: SyncedEntry,
 }
 
+#[derive(Debug)]
 struct SyncLock {
     path: PathBuf,
 }
@@ -76,10 +77,10 @@ enum StaleVerdict {
 /// Parse the `pid=<N>` line out of a lockfile body.
 fn parse_lock_pid(contents: &str) -> Option<u32> {
     for line in contents.lines() {
-        if let Some(rest) = line.strip_prefix("pid=") {
-            if let Ok(pid) = rest.trim().parse::<u32>() {
-                return Some(pid);
-            }
+        if let Some(rest) = line.strip_prefix("pid=")
+            && let Ok(pid) = rest.trim().parse::<u32>()
+        {
+            return Some(pid);
         }
     }
     None
@@ -124,14 +125,13 @@ fn classify_existing_lock(path: &Path, contents: &str) -> StaleVerdict {
         None => return StaleVerdict::Malformed,
     }
 
-    if let Ok(meta) = fs::metadata(path) {
-        if let Ok(modified) = meta.modified() {
-            if let Ok(age) = modified.elapsed() {
-                let age_secs = age.as_secs();
-                if age_secs > STALE_LOCK_MAX_AGE_SECS {
-                    return StaleVerdict::TooOld { age_secs };
-                }
-            }
+    if let Ok(meta) = fs::metadata(path)
+        && let Ok(modified) = meta.modified()
+        && let Ok(age) = modified.elapsed()
+    {
+        let age_secs = age.as_secs();
+        if age_secs > STALE_LOCK_MAX_AGE_SECS {
+            return StaleVerdict::TooOld { age_secs };
         }
     }
 
