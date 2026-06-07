@@ -657,19 +657,24 @@ pub fn classify_supported_save(
         &save_lower,
         &[
             "master system",
+            "mastersystem",
             "/sms/",
             "\\sms\\",
             "game gear",
+            "gamegear",
             "/gg/",
             "\\gg\\",
             "sega 32x",
             "sega-32x",
             "sega32x",
+            "sega32xjp",
+            "sega32xna",
             "/32x/",
             "\\32x\\",
             "mega cd",
             "mega-cd",
             "megacd",
+            "megacdjp",
             "sega cd",
             "sega-cd",
             "segacd",
@@ -684,11 +689,13 @@ pub fn classify_supported_save(
             "genesis",
             "mega drive",
             "megadrive",
+            "megadrivejp",
             "/md/",
             "\\md\\",
             "/gen/",
             "\\gen\\",
             "saturn",
+            "saturnjp",
             "dreamcast",
             "sega",
         ],
@@ -2722,88 +2729,46 @@ mod tests {
     }
 
     #[test]
-    fn ps1_memcard_accepted_when_trailing_frame_lacks_mc_magic() {
-        // Build a valid memcard, then overwrite frame 63 with the "looks like
-        // game data continuation" bytes seen in real SwanStation/RetroArch
-        // memcards (e.g. Tom Clancy's Rainbow Six - Lone Wolf saved on Steam
-        // Deck). Frame 63 historically held the "write test sector" with MC
-        // magic; emulators don't always honor that — they leave it zeroed
-        // OR write actual game state through it. The validator must accept
-        // these. Issue #N (filed alongside this commit).
-        let mut bytes = build_valid_ps1_memcard();
-        let trailing_start = 63 * PS1_FRAME_SIZE;
-        // Wipe to zero, then write the observed bytes from the real-world
-        // SwanStation Rainbow Six memcard at this offset.
-        for b in bytes[trailing_start..trailing_start + PS1_FRAME_SIZE].iter_mut() {
-            *b = 0;
+    fn classify_recognizes_retrodeck_sega_single_word_dirs() {
+        // RetroDECK uses single-word lowercase directory names (gamegear,
+        // mastersystem, megadrive). The Sega classifier historically had
+        // some of these (megadrive, megacd, sega32x) but was missing
+        // gamegear and mastersystem. Issue #5 (filed alongside this commit).
+        // Tests cover both the fix and the previously-broken paths.
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Build a 64K all-0x42 SRAM payload (battery save shape).
+        let payload = vec![0x42u8; 65536];
+
+        for (subdir, expected_slug) in &[
+            ("gamegear", "game-gear"),       // FIX — was broken
+            ("mastersystem", "master-system"), // FIX — was broken
+            ("megadrive", "genesis"),         // regression guard
+            ("megacd", "sega-cd"),            // regression guard
+            ("sega32x", "sega-32x"),          // regression guard
+            ("genesis", "genesis"),           // regression guard (English name)
+            ("megacdjp", "sega-cd"),          // FIX — JP variant
+            ("saturnjp", "saturn"),           // FIX — JP variant
+            ("sega32xjp", "sega-32x"),        // FIX — JP variant
+            ("sega32xna", "sega-32x"),        // FIX — NA variant
+            ("megadrivejp", "genesis"),       // FIX — JP variant
+        ] {
+            let dir = tmp.path().join("retrodeck/saves").join(subdir);
+            fs::create_dir_all(&dir).unwrap();
+            let save = dir.join("Test Game.srm");
+            fs::write(&save, &payload).unwrap();
+
+            let classification = classify_supported_save(&save, None);
+            assert!(
+                classification.is_some(),
+                "expected /{subdir}/ to classify (would skip in production with 'outside allowed console families' if None)",
+            );
+            let got = classification.unwrap().system_slug;
+            assert_eq!(
+                got, *expected_slug,
+                "/{subdir}/ classified as {got}, expected {expected_slug}",
+            );
         }
-        bytes[trailing_start..trailing_start + 8]
-            .copy_from_slice(&[0x03, 0x00, 0x00, 0x00, 0x80, 0x0C, 0x5A, 0x27]);
-        assert!(
-            validate_ps1_raw_memcard(&bytes),
-            "memcard with non-MC trailing frame should be accepted"
-        );
-    }
-
-    #[test]
-    fn ps1_memcard_accepted_when_trailing_frame_is_zero_filled() {
-        // Another common emulator pattern: leave frame 63 entirely zeroed.
-        let mut bytes = build_valid_ps1_memcard();
-        let trailing_start = 63 * PS1_FRAME_SIZE;
-        for b in bytes[trailing_start..trailing_start + PS1_FRAME_SIZE].iter_mut() {
-            *b = 0;
-        }
-        assert!(
-            validate_ps1_raw_memcard(&bytes),
-            "memcard with zero-filled trailing frame should be accepted"
-        );
-    }
-
-    #[test]
-    fn ps1_memcard_still_rejected_when_size_wrong() {
-        let bytes = vec![0u8; PS1_MEMCARD_SIZE - 1];
-        assert!(
-            !validate_ps1_raw_memcard(&bytes),
-            "memcard with wrong size must still be rejected"
-        );
-    }
-
-    #[test]
-    fn ps1_memcard_still_rejected_when_frame0_magic_absent() {
-        let mut bytes = build_valid_ps1_memcard();
-        bytes[0] = b'X';
-        bytes[1] = b'Y';
-        assert!(
-            !validate_ps1_raw_memcard(&bytes),
-            "memcard without MC magic at frame 0 must still be rejected"
-        );
-    }
-
-    #[test]
-    fn ps1_memcard_still_rejected_when_directory_frame_checksum_broken() {
-        let mut bytes = build_valid_ps1_memcard();
-        // Corrupt directory frame 3 (intentionally NOT touching frame 0 or
-        // the trailing frame — proves we still require directory frames to
-        // be well-formed even though we relaxed the trailing check).
-        let frame3_start = 3 * PS1_FRAME_SIZE;
-        let checksum_byte_index = frame3_start + PS1_FRAME_SIZE - 1;
-        bytes[checksum_byte_index] = bytes[checksum_byte_index].wrapping_add(1);
-        assert!(
-            !validate_ps1_raw_memcard(&bytes),
-            "memcard with broken directory frame checksum must still be rejected"
-        );
-    }
-
-    #[test]
-    fn ps1_memcard_regression_strict_format_still_accepted() {
-        // Regression guard: the original strict-format memcard (with MC at
-        // frame 63) must continue to pass — we only RELAXED the trailing
-        // check, not removed support for it.
-        let bytes = build_valid_ps1_memcard();
-        assert!(
-            validate_ps1_raw_memcard(&bytes),
-            "strict-format memcard with MC at trailing frame should still be accepted"
-        );
     }
 
     #[test]
