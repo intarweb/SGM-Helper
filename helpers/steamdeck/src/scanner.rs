@@ -657,19 +657,24 @@ pub fn classify_supported_save(
         &save_lower,
         &[
             "master system",
+            "mastersystem",
             "/sms/",
             "\\sms\\",
             "game gear",
+            "gamegear",
             "/gg/",
             "\\gg\\",
             "sega 32x",
             "sega-32x",
             "sega32x",
+            "sega32xjp",
+            "sega32xna",
             "/32x/",
             "\\32x\\",
             "mega cd",
             "mega-cd",
             "megacd",
+            "megacdjp",
             "sega cd",
             "sega-cd",
             "segacd",
@@ -684,11 +689,13 @@ pub fn classify_supported_save(
             "genesis",
             "mega drive",
             "megadrive",
+            "megadrivejp",
             "/md/",
             "\\md\\",
             "/gen/",
             "\\gen\\",
             "saturn",
+            "saturnjp",
             "dreamcast",
             "sega",
         ],
@@ -2804,6 +2811,46 @@ mod tests {
             validate_ps1_raw_memcard(&bytes),
             "strict-format memcard with MC at trailing frame should still be accepted"
         );
+    }
+
+    #[test]
+    fn classify_recognizes_retrodeck_sega_single_word_dirs() {
+        // RetroDECK uses single-word lowercase directory names (gamegear,
+        // mastersystem, megadrive). The Sega classifier historically had
+        // some of these (megadrive, megacd, sega32x) but was missing
+        // gamegear and mastersystem. Issue #5 (filed alongside this commit).
+        // Tests cover both the fix and the previously-broken paths.
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Build a 64K all-0x42 SRAM payload (battery save shape).
+        let payload = vec![0x42u8; 65536];
+
+        for (subdir, expected_slug) in &[
+            ("gamegear", "game-gear"),       // FIX — was broken
+            ("mastersystem", "master-system"), // FIX — was broken
+            ("megadrive", "genesis"),         // regression guard
+            ("megacd", "sega-cd"),            // regression guard
+            ("sega32x", "sega-32x"),          // regression guard
+            ("genesis", "genesis"),           // regression guard (English name)
+            ("megacdjp", "sega-cd"),          // FIX — JP variant
+            ("saturnjp", "saturn"),           // FIX — JP variant
+        ] {
+            let dir = tmp.path().join("retrodeck/saves").join(subdir);
+            fs::create_dir_all(&dir).unwrap();
+            let save = dir.join("Test Game.srm");
+            fs::write(&save, &payload).unwrap();
+
+            let classification = classify_supported_save(&save, None);
+            assert!(
+                classification.is_some(),
+                "expected /{subdir}/ to classify (would skip in production with 'outside allowed console families' if None)",
+            );
+            let got = classification.unwrap().system_slug;
+            assert_eq!(
+                got, *expected_slug,
+                "/{subdir}/ classified as {got}, expected {expected_slug}",
+            );
+        }
     }
 
     #[test]
