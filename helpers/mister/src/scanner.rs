@@ -1991,10 +1991,14 @@ fn validate_ps1_raw_memcard(bytes: &[u8]) -> bool {
         }
     }
 
-    let trailing_start = 63 * PS1_FRAME_SIZE;
-    let trailing_end = trailing_start + PS1_FRAME_SIZE;
-    let trailing = &header[trailing_start..trailing_end];
-    trailing.starts_with(b"MC") && frame_checksum_ok(trailing)
+    // Frame 63 ("write test sector") historically duplicates frame 0's MC magic
+    // on real-hardware-formatted cards. Many emulators (SwanStation / Beetle
+    // PSX / Duckstation libretro) do NOT populate it that way — they leave it
+    // zero-filled or write game data through it. Requiring "MC" here was
+    // rejecting every RetroArch/SwanStation memcard as if it were noise.
+    // Frame 0 magic + frames 1-15 checksums are sufficient evidence this is
+    // a real PS1 memcard.
+    true
 }
 
 fn frame_checksum_ok(frame: &[u8]) -> bool {
