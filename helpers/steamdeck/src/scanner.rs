@@ -1991,10 +1991,14 @@ fn validate_ps1_raw_memcard(bytes: &[u8]) -> bool {
         }
     }
 
-    let trailing_start = 63 * PS1_FRAME_SIZE;
-    let trailing_end = trailing_start + PS1_FRAME_SIZE;
-    let trailing = &header[trailing_start..trailing_end];
-    trailing.starts_with(b"MC") && frame_checksum_ok(trailing)
+    // Frame 63 ("write test sector") historically duplicates frame 0's MC magic
+    // on real-hardware-formatted cards. Many emulators (SwanStation / Beetle
+    // PSX / Duckstation libretro) do NOT populate it that way — they leave it
+    // zero-filled or write game data through it. Requiring "MC" here was
+    // rejecting every RetroArch/SwanStation memcard as if it were noise.
+    // Frame 0 magic + frames 1-15 checksums are sufficient evidence this is
+    // a real PS1 memcard.
+    true
 }
 
 fn frame_checksum_ok(frame: &[u8]) -> bool {
@@ -2715,6 +2719,91 @@ mod tests {
         let rewritten =
             encode_download_for_local_container(&raw, SaveContainerFormat::Ps1Vmp).unwrap();
         assert_eq!(rewritten, encoded);
+    }
+
+    #[test]
+    fn ps1_memcard_accepted_when_trailing_frame_lacks_mc_magic() {
+        // Build a valid memcard, then overwrite frame 63 with the "looks like
+        // game data continuation" bytes seen in real SwanStation/RetroArch
+        // memcards (e.g. Tom Clancy's Rainbow Six - Lone Wolf saved on Steam
+        // Deck). Frame 63 historically held the "write test sector" with MC
+        // magic; emulators don't always honor that — they leave it zeroed
+        // OR write actual game state through it. The validator must accept
+        // these. Issue #N (filed alongside this commit).
+        let mut bytes = build_valid_ps1_memcard();
+        let trailing_start = 63 * PS1_FRAME_SIZE;
+        // Wipe to zero, then write the observed bytes from the real-world
+        // SwanStation Rainbow Six memcard at this offset.
+        for b in bytes[trailing_start..trailing_start + PS1_FRAME_SIZE].iter_mut() {
+            *b = 0;
+        }
+        bytes[trailing_start..trailing_start + 8]
+            .copy_from_slice(&[0x03, 0x00, 0x00, 0x00, 0x80, 0x0C, 0x5A, 0x27]);
+        assert!(
+            validate_ps1_raw_memcard(&bytes),
+            "memcard with non-MC trailing frame should be accepted"
+        );
+    }
+
+    #[test]
+    fn ps1_memcard_accepted_when_trailing_frame_is_zero_filled() {
+        // Another common emulator pattern: leave frame 63 entirely zeroed.
+        let mut bytes = build_valid_ps1_memcard();
+        let trailing_start = 63 * PS1_FRAME_SIZE;
+        for b in bytes[trailing_start..trailing_start + PS1_FRAME_SIZE].iter_mut() {
+            *b = 0;
+        }
+        assert!(
+            validate_ps1_raw_memcard(&bytes),
+            "memcard with zero-filled trailing frame should be accepted"
+        );
+    }
+
+    #[test]
+    fn ps1_memcard_still_rejected_when_size_wrong() {
+        let bytes = vec![0u8; PS1_MEMCARD_SIZE - 1];
+        assert!(
+            !validate_ps1_raw_memcard(&bytes),
+            "memcard with wrong size must still be rejected"
+        );
+    }
+
+    #[test]
+    fn ps1_memcard_still_rejected_when_frame0_magic_absent() {
+        let mut bytes = build_valid_ps1_memcard();
+        bytes[0] = b'X';
+        bytes[1] = b'Y';
+        assert!(
+            !validate_ps1_raw_memcard(&bytes),
+            "memcard without MC magic at frame 0 must still be rejected"
+        );
+    }
+
+    #[test]
+    fn ps1_memcard_still_rejected_when_directory_frame_checksum_broken() {
+        let mut bytes = build_valid_ps1_memcard();
+        // Corrupt directory frame 3 (intentionally NOT touching frame 0 or
+        // the trailing frame — proves we still require directory frames to
+        // be well-formed even though we relaxed the trailing check).
+        let frame3_start = 3 * PS1_FRAME_SIZE;
+        let checksum_byte_index = frame3_start + PS1_FRAME_SIZE - 1;
+        bytes[checksum_byte_index] = bytes[checksum_byte_index].wrapping_add(1);
+        assert!(
+            !validate_ps1_raw_memcard(&bytes),
+            "memcard with broken directory frame checksum must still be rejected"
+        );
+    }
+
+    #[test]
+    fn ps1_memcard_regression_strict_format_still_accepted() {
+        // Regression guard: the original strict-format memcard (with MC at
+        // frame 63) must continue to pass — we only RELAXED the trailing
+        // check, not removed support for it.
+        let bytes = build_valid_ps1_memcard();
+        assert!(
+            validate_ps1_raw_memcard(&bytes),
+            "strict-format memcard with MC at trailing frame should still be accepted"
+        );
     }
 
     #[test]
