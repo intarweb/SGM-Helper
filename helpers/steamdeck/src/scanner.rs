@@ -727,6 +727,54 @@ pub fn classify_supported_save(
     if contains_any(
         &save_lower,
         &[
+            "pc engine",
+            "pcengine",
+            "pc-engine",
+            "pcenginecd",
+            "pc-engine-cd",
+            "turbografx",
+            "turbo grafx",
+            "turbo-grafx",
+            "tgfx16",
+            "/tg16/",
+            "\\tg16\\",
+            "/tg-cd/",
+            "\\tg-cd\\",
+            "/tg_cd/",
+            "\\tg_cd\\",
+            "supergrafx",
+            "super grafx",
+            "/sgx/",
+            "\\sgx\\",
+            "/pce/",
+            "\\pce\\",
+            "/pce-cd/",
+            "\\pce-cd\\",
+            "/pcecd/",
+            "\\pcecd\\",
+            "nec - pc engine",
+            "nec - turbografx",
+            "mednafen-pce",
+            "beetle pce",
+            "beetle-pce",
+        ],
+    ) {
+        let slug = infer_nec_slug(&save_lower);
+        if is_plausible_save_for_system(&save_ext, save_size, slug) {
+            return classify_if_valid(
+                save_path,
+                &save_ext,
+                save_size,
+                slug,
+                format!("path hint nec + .{} ({} bytes)", save_ext, save_size),
+            );
+        }
+        return None;
+    }
+
+    if contains_any(
+        &save_lower,
+        &[
             "playstation",
             "sony",
             "/psx/",
@@ -970,6 +1018,14 @@ fn infer_sega_slug(haystack: &str) -> &'static str {
     "genesis"
 }
 
+fn infer_nec_slug(_haystack: &str) -> &'static str {
+    // MiSTer's TurboGrafx-16 core handles both HuCard ROMs and CD-ROM games
+    // under one core (TGFX16). Saves land in /media/fat/saves/TGFX16/ for
+    // both. Future work could split tgfx16-cd if MiSTer's core ever
+    // splits, or if a downstream consumer wants the distinction.
+    "tgfx16"
+}
+
 fn infer_sony_slug(haystack: &str) -> &'static str {
     if contains_any(
         haystack,
@@ -1074,6 +1130,7 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
         "saturn" => matches!(ext, "sav" | "srm" | "ram" | "bkr"),
         "dreamcast" => matches!(ext, "bin" | "vms" | "dci"),
         "neogeo" => matches!(ext, "sav" | "srm" | "ram"),
+        "tgfx16" => matches!(ext, "sav" | "srm" | "ram" | "bkr" | "brm"),
         "wii" => ext == "bin",
         "psx" => matches!(
             ext,
@@ -1143,6 +1200,13 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
             // around the 64 KiB payload, so 0x12000 is valid even though it is not
             // a power-of-two size.
             size == 0x12000 || (size.is_power_of_two() && (512..=2_097_152).contains(&size))
+        }
+        "tgfx16" => {
+            // TurboGrafx-16 / PC Engine HuCard battery saves are typically 2KB SRAM.
+            // PCE CD / TGFX-CD adds backup RAM (BRAM) — 2KB stock, 8KB extended,
+            // or up to 32KB on some accessories. Accept the common power-of-two
+            // sizes in that range.
+            matches!(size, 2048 | 4096 | 8192 | 16384 | 32768)
         }
         "wii" => (WII_DATA_BIN_FILE_HEADER_OFFSET + 0x80..=MAX_SAVE_BYTES as usize)
             .contains(&(size as usize)),
@@ -2715,6 +2779,59 @@ mod tests {
         let rewritten =
             encode_download_for_local_container(&raw, SaveContainerFormat::Ps1Vmp).unwrap();
         assert_eq!(rewritten, encoded);
+    }
+
+    #[test]
+    fn classify_recognizes_pcengine_tgfx16_paths() {
+        // The TurboGrafx-16 / PC Engine block was missing entirely from
+        // classify_supported_save before this PR. Saves under any of the
+        // common dir conventions (RetroDECK / standalone / libretro) were
+        // skipped at "outside allowed console families." Issue (filed
+        // alongside this commit).
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = vec![0x42u8; 2048]; // 2KB — canonical HuCard SRAM size
+
+        for subdir in &[
+            "pcengine",          // RetroDECK convention
+            "pcenginecd",        // RetroDECK CD variant
+            "pc-engine",         // hyphen variant
+            "pc-engine-cd",      // hyphen CD variant
+            "tg16",              // older convention
+            "tg-cd",             // older CD convention
+            "tg_cd",             // underscore CD variant
+            "supergrafx",        // SuperGrafx
+            "super grafx",       // SuperGrafx with space
+            "sgx",               // SuperGrafx slug
+            "pce",               // short PC Engine slug
+            "pce-cd",            // short PCE CD
+            "pcecd",             // short PCE CD packed
+            "PC Engine",         // standalone with space
+            "TurboGrafx",        // standalone English name
+            "turbo grafx",       // English name with space
+            "turbo-grafx",       // English name with hyphen
+            "tgfx16",            // MiSTer slug
+            "nec - pc engine",   // NoIntro DAT naming
+            "nec - turbografx",  // NoIntro DAT naming variant
+            "mednafen-pce",      // libretro core name
+            "beetle pce",        // alternate libretro name
+            "beetle-pce",        // hyphen variant
+        ] {
+            let dir = tmp.path().join("retrodeck/saves").join(subdir);
+            fs::create_dir_all(&dir).unwrap();
+            let save = dir.join("Test Game.srm");
+            fs::write(&save, &payload).unwrap();
+
+            let classification = classify_supported_save(&save, None);
+            assert!(
+                classification.is_some(),
+                "expected /{subdir}/ to classify (would skip in production with 'outside allowed console families' if None)",
+            );
+            let got = classification.unwrap().system_slug;
+            assert_eq!(
+                got, "tgfx16",
+                "/{subdir}/ classified as {got}, expected tgfx16",
+            );
+        }
     }
 
     #[test]
