@@ -1103,10 +1103,18 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
             size,
             512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768 | 65536 | 131072
         ),
-        "gameboy" => matches!(
-            size,
-            512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768 | 65536
-        ),
+        "gameboy" => match ext {
+            // .rtc carries the GBC real-time clock state (Pokemon
+            // Crystal/Gold/Silver, Harvest Moon GBC). It's structurally
+            // different from SRAM — typically 8 bytes (MiSTer Gameboy_MiSTer
+            // canonical layout) up to ~64 bytes for variants with extra
+            // metadata. Don't apply the SRAM size profile to it.
+            "rtc" => (1..=64).contains(&size),
+            _ => matches!(
+                size,
+                512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768 | 65536
+            ),
+        },
         "gba" => matches!(size, 512 | 8192 | 32768 | 65536 | 131072),
         "n64" => match ext {
             "eep" => size == 512 || size == 2048,

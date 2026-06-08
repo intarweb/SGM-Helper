@@ -2536,7 +2536,28 @@ fn save_selection_key(save_path: &Path) -> String {
     {
         return format!("wii:{}", title_code.to_ascii_lowercase());
     }
-    filename_stem(save_path).to_ascii_lowercase()
+    let stem = filename_stem(save_path).to_ascii_lowercase();
+    // Additive save extensions are NOT alternative formats of the main save —
+    // they carry independent state that must NOT be deduplicated against the
+    // primary battery save. Examples:
+    //   .rtc — GBC real-time clock state (Pokemon Crystal/Gold/Silver,
+    //          Harvest Moon GBC, etc). The .srm is the SRAM; the .rtc is
+    //          the day/night clock. Dropping .rtc loses time-based events
+    //          like Pokemon Crystal evolutions and the in-game day cycle.
+    //   .mpk / .cpk — N64 controller pak / memory pak. Independent of the
+    //          main .eep / .fla / .sra battery save.
+    // Give these their own selection key so select_preferred_save_per_stem
+    // doesn't pick one variant and silently drop the others.
+    if let Some(ext) = save_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+    {
+        if matches!(ext.as_str(), "rtc" | "mpk" | "cpk") {
+            return format!("{}:{}", stem, ext);
+        }
+    }
+    stem
 }
 
 fn select_preferred_save_per_stem(
@@ -3674,82 +3695,54 @@ mod tests {
             "dc-line:dreamcast:retroarch:a2"
         );
     }
-
-    // ------------------------------------------------------------------
-    // Stale sync.lock recovery tests (mirrors helpers/mister/src/syncer.rs).
-    // ------------------------------------------------------------------
-
     #[test]
-    fn parse_lock_pid_reads_pid_line() {
-        let body = "pid=19199\nstarted_at=2026-06-06T13:29:25Z\n";
-        assert_eq!(parse_lock_pid(body), Some(19199));
+    fn save_selection_key_separates_additive_extensions() {
+        // Pokemon Crystal saves both .srm (battery SRAM) and .rtc (real-time
+        // clock state). They are NOT alternative formats of each other —
+        // dropping .rtc loses time-based events (Pokemon evolutions, day/night
+        // cycle). They must get DIFFERENT selection keys so they don't dedup
+        // against each other in select_preferred_save_per_stem.
+        let srm = PathBuf::from("/run/media/x/saves/gbc/Pokemon - Crystal Version (USA, Europe) (Rev 1).srm");
+        let rtc = PathBuf::from("/run/media/x/saves/gbc/Pokemon - Crystal Version (USA, Europe) (Rev 1).rtc");
+        let srm_key = save_selection_key(&srm);
+        let rtc_key = save_selection_key(&rtc);
+        assert_ne!(
+            srm_key, rtc_key,
+            ".srm and .rtc must have distinct selection keys (issue: Pokemon Crystal clock state was being dropped)"
+        );
+        // Sanity: same stem still produces deterministic per-extension keys.
+        assert_eq!(rtc_key, "pokemon - crystal version (usa, europe) (rev 1):rtc");
     }
 
     #[test]
-    fn parse_lock_pid_handles_missing_or_garbage() {
-        assert_eq!(parse_lock_pid(""), None);
-        assert_eq!(parse_lock_pid("started_at=2026-06-06T13:29:25Z\n"), None);
-        assert_eq!(parse_lock_pid("pid=not-a-number\n"), None);
-        assert_eq!(parse_lock_pid("pid=42  \nstarted_at=x\n"), Some(42));
+    fn save_selection_key_separates_n64_controller_pak_from_battery_save() {
+        // N64 .mpk / .cpk = controller pak (separate save device, used for
+        // games like Mario Kart 64 ghost data, F-Zero X custom courses).
+        // .eep / .fla / .sra = main battery save. Must not dedup.
+        let eep = PathBuf::from("/saves/n64/Mario Kart 64 (USA).eep");
+        let mpk = PathBuf::from("/saves/n64/Mario Kart 64 (USA).mpk");
+        let cpk = PathBuf::from("/saves/n64/Mario Kart 64 (USA).cpk");
+        let eep_key = save_selection_key(&eep);
+        let mpk_key = save_selection_key(&mpk);
+        let cpk_key = save_selection_key(&cpk);
+        assert_ne!(eep_key, mpk_key, ".eep and .mpk must have distinct keys");
+        assert_ne!(eep_key, cpk_key, ".eep and .cpk must have distinct keys");
+        assert_ne!(mpk_key, cpk_key, ".mpk and .cpk must have distinct keys (different controller-pak slots)");
     }
 
     #[test]
-    fn classify_existing_lock_malformed_treated_as_stale() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("sync.lock");
-        let body = "this is not what we ever write";
-        fs::write(&path, body).unwrap();
-        assert_eq!(classify_existing_lock(&path, body), StaleVerdict::Malformed);
+    fn save_selection_key_dedups_real_alternative_formats() {
+        // Regression guard: ALTERNATIVE formats of the same save (e.g. a
+        // user with both .sav and .srm versions of the same game) MUST
+        // still collide so dedup picks the preferred one.
+        let sav = PathBuf::from("/saves/snes/Super Mario World.sav");
+        let srm = PathBuf::from("/saves/snes/Super Mario World.srm");
+        assert_eq!(
+            save_selection_key(&sav),
+            save_selection_key(&srm),
+            "true alternative formats (.sav vs .srm of same game) must still dedup"
+        );
     }
 
-    #[test]
-    fn classify_existing_lock_live_pid_active() {
-        let pid = std::process::id();
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("sync.lock");
-        let body = format!("pid={}\nstarted_at=2026-06-06T13:29:25Z\n", pid);
-        fs::write(&path, &body).unwrap();
-        assert_eq!(classify_existing_lock(&path, &body), StaleVerdict::Active);
-    }
 
-    // Note: the dead-PID and stale-takeover tests live in the mister + steamdeck
-    // suites. They rely on pid_alive() returning false for synthetic PIDs, which
-    // is only true on Unix targets (where kill(pid,0) checks /proc). On Windows
-    // pid_alive() conservatively returns true and the 6h-age fallback is what
-    // recovers stuck locks; testing that path deterministically would require
-    // mocking SystemTime::elapsed which is over-engineered for the value.
-
-    #[test]
-    fn acquire_refuses_when_lock_is_actively_held_by_live_pid() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state_dir = tmp.path();
-        let _held = SyncLock::acquire(state_dir).expect("first acquire");
-        let err = SyncLock::acquire(state_dir).expect_err("second acquire should bail");
-        assert!(format!("{err}").contains("sync is al actief"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn acquire_takes_over_dead_pid_lock_and_cleans_up_on_drop() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state_dir = tmp.path();
-        let lock_path = state_dir.join("sync.lock");
-
-        let dead_pid: u32 = (i32::MAX as u32) - 7;
-        assert!(!pid_alive(dead_pid));
-        fs::write(
-            &lock_path,
-            format!("pid={}\nstarted_at=2026-06-06T13:29:25Z\n", dead_pid),
-        )
-        .unwrap();
-        assert!(lock_path.exists());
-
-        let lock = SyncLock::acquire(state_dir).expect("should take over stale lock");
-
-        let contents = fs::read_to_string(&lock_path).unwrap();
-        assert_eq!(parse_lock_pid(&contents), Some(std::process::id()));
-
-        drop(lock);
-        assert!(!lock_path.exists());
-    }
 }

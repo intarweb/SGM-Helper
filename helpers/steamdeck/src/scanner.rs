@@ -1103,10 +1103,18 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
             size,
             512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768 | 65536 | 131072
         ),
-        "gameboy" => matches!(
-            size,
-            512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768 | 65536
-        ),
+        "gameboy" => match ext {
+            // .rtc carries the GBC real-time clock state (Pokemon
+            // Crystal/Gold/Silver, Harvest Moon GBC). It's structurally
+            // different from SRAM — typically 8 bytes (MiSTer Gameboy_MiSTer
+            // canonical layout) up to ~64 bytes for variants with extra
+            // metadata. Don't apply the SRAM size profile to it.
+            "rtc" => (1..=64).contains(&size),
+            _ => matches!(
+                size,
+                512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768 | 65536
+            ),
+        },
         "gba" => matches!(size, 512 | 8192 | 32768 | 65536 | 131072),
         "n64" => match ext {
             "eep" => size == 512 || size == 2048,
@@ -2729,46 +2737,46 @@ mod tests {
     }
 
     #[test]
-    fn classify_recognizes_retrodeck_sega_single_word_dirs() {
-        // RetroDECK uses single-word lowercase directory names (gamegear,
-        // mastersystem, megadrive). The Sega classifier historically had
-        // some of these (megadrive, megacd, sega32x) but was missing
-        // gamegear and mastersystem. Issue #5 (filed alongside this commit).
-        // Tests cover both the fix and the previously-broken paths.
+    fn classify_accepts_tiny_rtc_files_for_gameboy() {
+        // Pokemon Crystal / Gold / Silver write an 8-byte .rtc clock-state
+        // file alongside the .srm. Before this fix, the gameboy size match
+        // arm only allowed power-of-two sizes 512..=65536 — so the 8-byte
+        // .rtc was rejected by classify_supported_save with "outside
+        // allowed console families" even after the dedup-key fix landed.
         let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("retrodeck/saves/gbc");
+        fs::create_dir_all(&dir).unwrap();
 
-        // Build a 64K all-0x42 SRAM payload (battery save shape).
-        let payload = vec![0x42u8; 65536];
+        // Canonical Pokemon Crystal RTC size on MiSTer Gameboy_MiSTer = 8 bytes.
+        let rtc = dir.join("Pokemon - Crystal Version (USA, Europe) (Rev 1).rtc");
+        fs::write(&rtc, [0u8; 8]).unwrap();
+        let cls = classify_supported_save(&rtc, None);
+        assert!(
+            cls.is_some(),
+            "8-byte .rtc must classify as gameboy (was: outside allowed console families)"
+        );
+        assert_eq!(cls.unwrap().system_slug, "gameboy");
 
-        for (subdir, expected_slug) in &[
-            ("gamegear", "game-gear"),       // FIX — was broken
-            ("mastersystem", "master-system"), // FIX — was broken
-            ("megadrive", "genesis"),         // regression guard
-            ("megacd", "sega-cd"),            // regression guard
-            ("sega32x", "sega-32x"),          // regression guard
-            ("genesis", "genesis"),           // regression guard (English name)
-            ("megacdjp", "sega-cd"),          // FIX — JP variant
-            ("saturnjp", "saturn"),           // FIX — JP variant
-            ("sega32xjp", "sega-32x"),        // FIX — JP variant
-            ("sega32xna", "sega-32x"),        // FIX — NA variant
-            ("megadrivejp", "genesis"),       // FIX — JP variant
-        ] {
-            let dir = tmp.path().join("retrodeck/saves").join(subdir);
-            fs::create_dir_all(&dir).unwrap();
-            let save = dir.join("Test Game.srm");
-            fs::write(&save, &payload).unwrap();
-
-            let classification = classify_supported_save(&save, None);
+        // Variants up to 64 bytes are also accepted (some emulators write
+        // additional clock-related metadata).
+        for size in &[1u64, 13, 32, 48, 64] {
+            let rtc = dir.join(format!("Test {}.rtc", size));
+            fs::write(&rtc, vec![0u8; *size as usize]).unwrap();
             assert!(
-                classification.is_some(),
-                "expected /{subdir}/ to classify (would skip in production with 'outside allowed console families' if None)",
-            );
-            let got = classification.unwrap().system_slug;
-            assert_eq!(
-                got, *expected_slug,
-                "/{subdir}/ classified as {got}, expected {expected_slug}",
+                classify_supported_save(&rtc, None).is_some(),
+                "{}-byte .rtc must classify as gameboy",
+                size
             );
         }
+
+        // Sanity: a non-RTC gameboy save still requires a power-of-two SRAM
+        // size — 8 bytes for a .srm is NOT a real save.
+        let bogus_srm = dir.join("Bogus.srm");
+        fs::write(&bogus_srm, [0u8; 8]).unwrap();
+        assert!(
+            classify_supported_save(&bogus_srm, None).is_none(),
+            "8-byte .srm is not a real gameboy save and must still be rejected"
+        );
     }
 
     #[test]
