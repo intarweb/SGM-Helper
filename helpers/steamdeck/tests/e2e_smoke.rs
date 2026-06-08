@@ -487,3 +487,87 @@ fn cloud_restore_skips_download_when_preferred_local_file_exists() {
     assert!(latest_mock.calls() >= 1);
     assert_eq!(download_mock.calls(), 0);
 }
+
+#[test]
+fn watch_loop_survives_per_cycle_sync_error() {
+    // Regression test for the reliability bug surfaced 2026-06-06: when the
+    // per-cycle sync invocation returned an Err (e.g. lock-contention bail
+    // "sync is al actief"), the entire watcher process exited instead of
+    // logging and moving on. Asserts:
+    //   1. exit status is success (0) — watcher did not propagate the cycle's
+    //      Err out of the loop.
+    //   2. stderr contains the new "waarschuwing: cyclus N mislukt" warning
+    //      for cycles 1 AND 2 — proves cycle 1's failure didn't kill the
+    //      process and cycle 2 also ran.
+    //
+    // Failure shape we exercise: pre-stage state/sync.lock with the test
+    // process's own PID (alive by definition), so SyncLock::acquire's
+    // classify_existing_lock returns Active, and run_sync bails.
+    use predicates::str::contains;
+
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_watch_err","expiresInDays":7}"#);
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"watch-err@example.com"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    Command::cargo_bin("sgm-steamdeck-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("watch-err@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+
+    // Pre-stage a lockfile owned by the (live) test process, so SyncLock::acquire
+    // sees an Active lock and run_sync bails on every cycle.
+    let live_pid = std::process::id();
+    let lock_path = state_dir.join("sync.lock");
+    fs::write(
+        &lock_path,
+        format!("pid={}\nstarted_at=2026-06-06T22:14:25Z\n", live_pid),
+    )
+    .unwrap();
+    assert!(
+        lock_path.exists(),
+        "precondition: lock file should be on disk"
+    );
+
+    Command::cargo_bin("sgm-steamdeck-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("watch")
+        .arg("--watch-interval")
+        .arg("1")
+        .arg("--max-cycles")
+        .arg("2")
+        .assert()
+        .success() // exit 0 — without the fix this would be Err propagation
+        .stderr(contains("waarschuwing: cyclus 1 mislukt"))
+        .stderr(contains("waarschuwing: cyclus 2 mislukt"));
+
+    // Lockfile should still be on disk — the watcher couldn't take it over
+    // (live PID = Active verdict), and our fix means it didn't try to.
+    assert!(lock_path.exists(), "active lock should still be on disk");
+}
