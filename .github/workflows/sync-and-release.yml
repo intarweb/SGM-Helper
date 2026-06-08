@@ -1,0 +1,233 @@
+name: Sync upstream + auto-release fork.N
+
+# Model B equivalent for binary-release projects.
+#
+# Rebuilds the `intarweb-dev` branch every cron tick from upstream/main +
+# cherry-picks of every open `intarweb→upstream` PR. If the resulting tree
+# has changed since the most recent `*-fork.N` tag, bumps the version,
+# tags `vX.Y.Z-fork.N+1`, and pushes — which triggers the existing
+# `Release ARMv7 + Anbernic + Windows + Steam Deck` workflow on tag-push,
+# which builds binaries and creates a GitHub Release.
+#
+# GitHub auto-marks the newest tag as Latest, so consumers always see the
+# most recent fork build with the latest open-PR set baked in.
+#
+# WARNING: this workflow is currently NOT scheduled (cron commented out).
+# Enable cron only after manual workflow_dispatch verification proves it
+# does the right thing on this repo's specific branch + tag conventions.
+
+on:
+  # schedule:
+  #   - cron: '*/15 * * * *'   # enable after manual verification
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Compute the new tag but do not push it (preview only)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: write
+  pull-requests: read
+  actions: write   # required for tag-push to trigger downstream workflow
+
+env:
+  UPSTREAM_OWNER: joeblack2k
+  UPSTREAM_REPO: SGM-Helper
+  UPSTREAM_BRANCH: main
+
+jobs:
+  sync-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout main with full history
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.SYNC_WORKFLOW_TOKEN || secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+          ref: main
+
+      - name: 🔧 Configure git identity
+        run: |
+          git config user.email "terafin@users.noreply.github.com"
+          git config user.name "terafin"
+
+      - name: 🔄 Add upstream + fetch
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}.git"
+          git fetch upstream "${UPSTREAM_BRANCH}" --depth=500
+          git fetch origin --tags --depth=500
+
+      - name: 📋 Discover open intarweb→upstream PRs
+        id: prs
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_WORKFLOW_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Open PRs filed FROM intarweb TO upstream
+          PRS=$(gh pr list \
+            --repo "${UPSTREAM_OWNER}/${UPSTREAM_REPO}" \
+            --state open \
+            --json number,headRefName,headRepositoryOwner \
+            --paginate \
+            --jq '[.[] | select(.headRepositoryOwner.login == "intarweb")] | sort_by(.number) | .[] | "\(.number)|\(.headRefName)"')
+          echo "Discovered open PRs:"
+          echo "${PRS}" | sed 's/^/  /' || echo "  (none)"
+          # Save to file (multiline-safe)
+          printf '%s\n' "${PRS}" > /tmp/open-prs.txt
+          COUNT=$(wc -l < /tmp/open-prs.txt | tr -d ' ')
+          [ -s /tmp/open-prs.txt ] || COUNT=0
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+
+      - name: 🌿 Build intarweb-dev tree from upstream + open PRs
+        id: build_tree
+        run: |
+          set -euo pipefail
+          # Start fresh from upstream main
+          git checkout -B intarweb-dev "upstream/${UPSTREAM_BRANCH}"
+
+          # Cherry-pick each open intarweb PR
+          if [ -s /tmp/open-prs.txt ]; then
+            while IFS='|' read -r prnum branch; do
+              [ -z "$prnum" ] && continue
+              echo "::group::PR #${prnum} — ${branch}"
+              git fetch origin "${branch}:${branch}" 2>&1 || {
+                echo "::warning::could not fetch branch ${branch} for PR #${prnum} — skipping"
+                echo "::endgroup::"
+                continue
+              }
+              # cherry-pick all commits on the PR branch that aren't on upstream/main
+              MERGE_BASE=$(git merge-base HEAD "${branch}" || git merge-base "upstream/${UPSTREAM_BRANCH}" "${branch}")
+              COMMITS=$(git rev-list --reverse "${MERGE_BASE}..${branch}")
+              for c in $COMMITS; do
+                if ! git cherry-pick -X theirs --allow-empty --keep-redundant-commits "$c" 2>&1; then
+                  echo "::warning::CONFLICT cherry-picking ${c:0:7} from PR #${prnum} — skipping this PR"
+                  git cherry-pick --abort 2>&1 || true
+                  break
+                fi
+              done
+              echo "::endgroup::"
+            done < /tmp/open-prs.txt
+          fi
+
+          NEW_TREE=$(git rev-parse HEAD^{tree})
+          NEW_HEAD=$(git rev-parse HEAD)
+          echo "new_tree=${NEW_TREE}" >> "$GITHUB_OUTPUT"
+          echo "new_head=${NEW_HEAD}" >> "$GITHUB_OUTPUT"
+          echo "Built intarweb-dev: HEAD=${NEW_HEAD:0:7}, tree=${NEW_TREE:0:7}"
+
+      - name: 🏷️ Determine next fork.N tag (tree-changed gate)
+        id: tag
+        run: |
+          set -euo pipefail
+          NEW_TREE="${{ steps.build_tree.outputs.new_tree }}"
+
+          # Find the newest existing fork.N tag
+          LAST_TAG=$(git tag --list 'v*-fork.[0-9]*' | sort -V | tail -1 || echo "")
+          echo "last_tag=${LAST_TAG}"
+
+          # Tree-changed gate: skip release if tree matches last fork tag
+          if [ -n "${LAST_TAG}" ]; then
+            LAST_TREE=$(git rev-parse "${LAST_TAG}^{tree}")
+            if [ "${NEW_TREE}" = "${LAST_TREE}" ]; then
+              echo "::notice::Tree unchanged vs ${LAST_TAG} — skipping release"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          # Compute next N
+          if [ -z "${LAST_TAG}" ]; then
+            LAST_N=0
+          else
+            LAST_N=$(echo "${LAST_TAG}" | sed -nE 's/.*-fork\.([0-9]+)$/\1/p')
+          fi
+          NEXT_N=$((LAST_N + 1))
+
+          # Read upstream version from Cargo.toml — strip any existing -fork.N suffix
+          UPSTREAM_VERSION=$(grep '^version = ' helpers/mister/Cargo.toml | head -1 \
+            | sed -E 's/.*"([^"]+)".*/\1/' \
+            | sed -E 's/-fork\.[0-9]+$//' \
+            | sed -E 's/-fork\.[0-9]+-[a-zA-Z0-9-]+$//')
+
+          NEW_VERSION="${UPSTREAM_VERSION}-fork.${NEXT_N}"
+          NEW_TAG="v${NEW_VERSION}"
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "next_n=${NEXT_N}" >> "$GITHUB_OUTPUT"
+          echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "new_tag=${NEW_TAG}" >> "$GITHUB_OUTPUT"
+          echo "upstream_version=${UPSTREAM_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Next release: ${NEW_TAG}"
+
+      - name: 🔢 Bump Cargo.toml + Cargo.lock to fork.N
+        if: steps.tag.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          UPSTREAM_VERSION="${{ steps.tag.outputs.upstream_version }}"
+          NEW_VERSION="${{ steps.tag.outputs.new_version }}"
+
+          for f in helpers/mister/Cargo.toml helpers/steamdeck/Cargo.toml helpers/windows/Cargo.toml Cargo.lock; do
+            # Match: bare upstream version OR existing -fork.N suffix
+            sed -i -E "s/^version = \"${UPSTREAM_VERSION}(-fork\.[0-9]+)?\"$/version = \"${NEW_VERSION}\"/" "$f"
+          done
+
+          # Verify all 3 helpers ended up at the new version
+          for f in helpers/mister/Cargo.toml helpers/steamdeck/Cargo.toml helpers/windows/Cargo.toml; do
+            got=$(grep -E '^version = ' "$f" | head -1)
+            if ! echo "$got" | grep -q "${NEW_VERSION}"; then
+              echo "::error::${f} did not bump to ${NEW_VERSION}: ${got}"
+              exit 1
+            fi
+          done
+          echo "Cargo.toml versions bumped to ${NEW_VERSION}"
+
+      - name: 💾 Commit version bump
+        if: steps.tag.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          git add helpers/mister/Cargo.toml helpers/steamdeck/Cargo.toml helpers/windows/Cargo.toml Cargo.lock
+          if git diff --cached --quiet; then
+            echo "::notice::No version-bump changes (versions already matched)"
+            exit 0
+          fi
+          git commit -m "auto: bump version to ${{ steps.tag.outputs.new_version }} (sync N open PRs)"
+
+      - name: 🚀 Force-push intarweb-dev + create tag
+        if: steps.tag.outputs.skip == 'false' && inputs.dry_run != 'true'
+        run: |
+          set -euo pipefail
+          git push --force origin intarweb-dev
+          git tag "${{ steps.tag.outputs.new_tag }}"
+          git push origin "${{ steps.tag.outputs.new_tag }}"
+          echo "::notice::Pushed ${{ steps.tag.outputs.new_tag }} — release workflow will fire on tag-push"
+
+      - name: 🧪 Dry-run preview only
+        if: steps.tag.outputs.skip == 'false' && inputs.dry_run == 'true'
+        run: |
+          echo "::notice::DRY RUN — would push:"
+          echo "  branch: intarweb-dev → ${{ steps.build_tree.outputs.new_head }}"
+          echo "  tag:    ${{ steps.tag.outputs.new_tag }}"
+
+      - name: 📋 Summary
+        if: always()
+        run: |
+          {
+            echo "## Sync + auto-release run"
+            echo ""
+            echo "Open PRs cherry-picked: ${{ steps.prs.outputs.count }}"
+            if [ "${{ steps.tag.outputs.skip }}" = "true" ]; then
+              echo ""
+              echo "**Skipped** — tree unchanged vs last fork tag."
+            else
+              echo ""
+              echo "**Released:** \`${{ steps.tag.outputs.new_tag }}\`"
+              if [ "${{ inputs.dry_run }}" = "true" ]; then
+                echo "_(dry run — no push)_"
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
