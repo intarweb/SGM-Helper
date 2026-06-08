@@ -62,7 +62,14 @@ pub fn run_watch(
 
     let mut cycles: u32 = 0;
     while !stop_flag.load(Ordering::SeqCst) {
-        let report = run_sync(
+        // Per-cycle errors must NOT exit the watcher. Capture the result
+        // so we can log + continue, only stop_flag (set by SIGINT/SIGTERM)
+        // breaks the loop. Surfaced as a real reliability bug 2026-06-06:
+        // a brief lock-contention race had the watcher exit mid-day with
+        // `Error: sync is al actief (lockfile bestaat)` and stop syncing
+        // entirely until manual restart. With the stale-lock takeover from
+        // the previous PR enabled, races become more likely, not less.
+        let report_result = run_sync(
             config,
             auth,
             &SyncOptions {
@@ -75,25 +82,35 @@ pub fn run_watch(
                 default_source_kind: options.default_source_kind.clone(),
             },
             verbose,
-        )?;
+        );
 
         scan_once = false;
         deep_scan_once = false;
         apply_scan_once = false;
 
         cycles += 1;
-        if !quiet {
-            println!(
-                "Watch cycle {} complete: scanned={} uploaded={} downloaded={} in_sync={} conflicts={} skipped={} errors={}",
-                cycles,
-                report.scanned,
-                report.uploaded,
-                report.downloaded,
-                report.in_sync,
-                report.conflicts,
-                report.skipped,
-                report.errors
-            );
+        match report_result {
+            Ok(report) => {
+                if !quiet {
+                    println!(
+                        "Watch cycle {} complete: scanned={} uploaded={} downloaded={} in_sync={} conflicts={} skipped={} errors={}",
+                        cycles,
+                        report.scanned,
+                        report.uploaded,
+                        report.downloaded,
+                        report.in_sync,
+                        report.conflicts,
+                        report.skipped,
+                        report.errors
+                    );
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "waarschuwing: cyclus {} mislukt; doorgaan met volgende cyclus: {err:#}",
+                    cycles
+                );
+            }
         }
 
         if let Some(max_cycles) = options.max_cycles
