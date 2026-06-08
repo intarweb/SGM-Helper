@@ -2428,9 +2428,10 @@ fn save_selection_key(save_path: &Path) -> String {
         .extension()
         .and_then(|value| value.to_str())
         .map(|value| value.to_ascii_lowercase())
-        && matches!(ext.as_str(), "rtc" | "mpk" | "cpk")
     {
-        return format!("{}:{}", stem, ext);
+        if matches!(ext.as_str(), "rtc" | "mpk" | "cpk") {
+            return format!("{}:{}", stem, ext);
+        }
     }
     stem
 }
@@ -3577,12 +3578,8 @@ mod tests {
         // dropping .rtc loses time-based events (Pokemon evolutions, day/night
         // cycle). They must get DIFFERENT selection keys so they don't dedup
         // against each other in select_preferred_save_per_stem.
-        let srm = PathBuf::from(
-            "/run/media/x/saves/gbc/Pokemon - Crystal Version (USA, Europe) (Rev 1).srm",
-        );
-        let rtc = PathBuf::from(
-            "/run/media/x/saves/gbc/Pokemon - Crystal Version (USA, Europe) (Rev 1).rtc",
-        );
+        let srm = PathBuf::from("/run/media/x/saves/gbc/Pokemon - Crystal Version (USA, Europe) (Rev 1).srm");
+        let rtc = PathBuf::from("/run/media/x/saves/gbc/Pokemon - Crystal Version (USA, Europe) (Rev 1).rtc");
         let srm_key = save_selection_key(&srm);
         let rtc_key = save_selection_key(&rtc);
         assert_ne!(
@@ -3590,10 +3587,7 @@ mod tests {
             ".srm and .rtc must have distinct selection keys (issue: Pokemon Crystal clock state was being dropped)"
         );
         // Sanity: same stem still produces deterministic per-extension keys.
-        assert_eq!(
-            rtc_key,
-            "pokemon - crystal version (usa, europe) (rev 1):rtc"
-        );
+        assert_eq!(rtc_key, "pokemon - crystal version (usa, europe) (rev 1):rtc");
     }
 
     #[test]
@@ -3609,10 +3603,7 @@ mod tests {
         let cpk_key = save_selection_key(&cpk);
         assert_ne!(eep_key, mpk_key, ".eep and .mpk must have distinct keys");
         assert_ne!(eep_key, cpk_key, ".eep and .cpk must have distinct keys");
-        assert_ne!(
-            mpk_key, cpk_key,
-            ".mpk and .cpk must have distinct keys (different controller-pak slots)"
-        );
+        assert_ne!(mpk_key, cpk_key, ".mpk and .cpk must have distinct keys (different controller-pak slots)");
     }
 
     #[test]
@@ -3628,4 +3619,6 @@ mod tests {
             "true alternative formats (.sav vs .srm of same game) must still dedup"
         );
     }
+
+
 }
