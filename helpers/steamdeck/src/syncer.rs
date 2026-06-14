@@ -2778,10 +2778,9 @@ fn save_selection_key(save_path: &Path) -> String {
         .extension()
         .and_then(|value| value.to_str())
         .map(|value| value.to_ascii_lowercase())
+        && matches!(ext.as_str(), "rtc" | "mpk" | "cpk")
     {
-        if matches!(ext.as_str(), "rtc" | "mpk" | "cpk") {
-            return format!("{}:{}", stem, ext);
-        }
+        return format!("{}:{}", stem, ext);
     }
     stem
 }
