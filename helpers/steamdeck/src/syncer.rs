@@ -2674,7 +2674,7 @@ fn system_profile_field_key(system_slug: &str) -> String {
     }
 }
 
-fn resolve_slot_name_for_sync(
+pub(crate) fn resolve_slot_name_for_sync(
     system_slug: &str,
     save_path: &Path,
     configured_slot: &str,
