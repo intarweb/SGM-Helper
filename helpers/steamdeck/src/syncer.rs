@@ -12,11 +12,11 @@ use crate::backend_config::sync_config_with_backend;
 use crate::config::AppConfig;
 use crate::ports::{PortSaveMatch, discover_port_save_matches};
 use crate::scanner::{
-    RomIndexEntry, SaveAdapterProfile, SaveContainerFormat, classify_supported_save,
+    RomIndexEntry, SaveAdapterProfile, SaveContainerFormat, allow_write, classify_supported_save,
     discover_rom_index, discover_save_files, dreamcast_skip_reason,
     encode_download_for_local_container, filename_stem, md5_file, normalize_save_bytes_for_sync,
-    normalize_save_for_sync, saturn_skip_reason, sha1_file, sha256_bytes, wii_skip_reason,
-    wii_title_code_from_path,
+    normalize_save_for_sync, saturn_skip_reason, sha1_file, sha256_bytes, sidecar_label,
+    wii_skip_reason, wii_title_code_from_path,
 };
 use crate::sources::{EmulatorProfile, SourceKind, prepare_sources_for_sync};
 use crate::state::{AuthState, SyncedEntry, load_sync_state, now_rfc3339, save_sync_state};
@@ -650,6 +650,35 @@ fn restore_single_cloud_save(
 
     let target_key = target_path.to_string_lossy().to_string();
     if restored_targets.contains(&target_key) {
+        return Ok(());
+    }
+
+    // Cross-ext sidecar write-guard (see the canonical-write path): never restore
+    // a cloud record onto a local path of a mismatched sidecar/primary class.
+    // canonical ext = the cloud record's own filename ext; primary<->primary
+    // (container conversions) always allowed.
+    let canonical_ext = std::path::Path::new(&cloud_save.filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    let restore_target_ext = target_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !allow_write(&canonical_ext, &restore_target_ext) {
+        report.skipped += 1;
+        if verbose {
+            eprintln!(
+                "Skipping cloud {} save '{}': format '{}' cannot be written to {} \
+                 (sidecar cross-ext guard)",
+                system_slug,
+                cloud_save.display_name(),
+                canonical_ext,
+                target_path.display()
+            );
+        }
         return Ok(());
     }
 
@@ -1654,6 +1683,7 @@ fn process_single_save(
                 sha256: None,
                 version: None,
                 id: None,
+                format: None,
             }
         }
         Err(err) if is_missing_cloud_payload_reference(&err) => {
@@ -1668,6 +1698,7 @@ fn process_single_save(
                 sha256: None,
                 version: None,
                 id: None,
+                format: None,
             }
         }
         Err(err) if is_playstation_projection_unavailable(&err, &system_slug) => {
@@ -1682,6 +1713,7 @@ fn process_single_save(
                 sha256: None,
                 version: None,
                 id: None,
+                format: None,
             }
         }
         Err(err) => return Err(err),
@@ -2073,6 +2105,29 @@ fn process_single_save(
             normalized_save.local_container,
             Some(canonical_bytes.len() as u64),
         );
+        // 🔴 Cross-ext sidecar write-guard (belt-and-suspenders behind the
+        // distinct-slot fix): never overwrite the local save with a canonical of
+        // a mismatched sidecar/primary class — an 8-byte .rtc must NEVER clobber a
+        // 32 KB .srm. `latest.format` is RSM's bare-ext for the canonical record;
+        // None on older RSM → no check (prior behavior). Skip the write AND the
+        // follow-on remove_file so neither the target nor the source is touched.
+        if let Some(ref canonical_format) = latest.format {
+            let target_ext = target_save_path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.to_ascii_lowercase())
+                .unwrap_or_default();
+            if !allow_write(canonical_format, &target_ext) {
+                report.skipped += 1;
+                eprintln!(
+                    "Refusing to write canonical save (format '{}') to {}: \
+                     mismatched save class (sidecar cross-ext guard) — not clobbering",
+                    canonical_format,
+                    target_save_path.display()
+                );
+                return Ok(None);
+            }
+        }
         if let Some(parent) = target_save_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("kan map niet maken: {}", parent.display()))?;
@@ -2210,6 +2265,7 @@ fn process_missing_save(
             sha256: None,
             version: None,
             id: None,
+            format: None,
         },
         Err(err) => return Err(err),
     };
@@ -2619,6 +2675,32 @@ fn system_profile_field_key(system_slug: &str) -> String {
 }
 
 fn resolve_slot_name_for_sync(
+    system_slug: &str,
+    save_path: &Path,
+    configured_slot: &str,
+) -> String {
+    let base = resolve_base_slot_for_sync(system_slug, save_path, configured_slot);
+    // Sidecar saves (.rtc / .mpk / .cpk) carry state INDEPENDENT of the primary
+    // battery save and must NOT share its cloud slot — otherwise they collide as
+    // competing versions of one record and the newest wins, so an 8-byte .rtc
+    // overwrites the 32KB .srm on the next sync. Give each sidecar its own slot,
+    // RSM-native form `"<primary> (<LABEL>)"` (e.g. "default (RTC)") — a
+    // parenthetical label, never "::"/":", which are the conflict-key delimiters.
+    // Mirrors the existing PSX "Memory Card 1/2" multi-slot precedent. Primaries
+    // (incl. container-equivalent exts like srm/sav or mcr/vmp/gme) keep the base.
+    if let Some(ext) = save_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+    {
+        if let Some(label) = sidecar_label(&ext) {
+            return format!("{base} ({label})");
+        }
+    }
+    base
+}
+
+fn resolve_base_slot_for_sync(
     system_slug: &str,
     save_path: &Path,
     configured_slot: &str,
@@ -3188,6 +3270,45 @@ mod tests {
         assert!(source_allows_system(&systems, "N64"));
         assert!(!source_allows_system(&systems, "wii"));
         assert!(!source_allows_system(&[], "snes"));
+    }
+
+    #[test]
+    fn resolve_slot_name_gives_sidecars_a_distinct_slot() {
+        // The root cloud-clobber fix: .srm (primary) and .rtc (sidecar) of the
+        // same game must resolve to DIFFERENT cloud slots so they don't collide
+        // as competing versions of one record (which let the 8B .rtc overwrite
+        // the 32KB .srm). Primaries keep the base slot; sidecars get base:ext.
+        let srm = PathBuf::from("/saves/gbc/Pokemon - Crystal Version (USA, Europe) (Rev 1).srm");
+        let rtc = PathBuf::from("/saves/gbc/Pokemon - Crystal Version (USA, Europe) (Rev 1).rtc");
+        let srm_slot = resolve_slot_name_for_sync("gameboy", &srm, "default");
+        let rtc_slot = resolve_slot_name_for_sync("gameboy", &rtc, "default");
+        assert_eq!(srm_slot, "default", "primary .srm keeps the base slot");
+        assert_eq!(
+            rtc_slot, "default (RTC)",
+            "sidecar .rtc gets the parenthetical RTC label"
+        );
+        assert_ne!(
+            srm_slot, rtc_slot,
+            ".srm and .rtc must not share a cloud slot"
+        );
+        assert!(
+            !rtc_slot.contains(':'),
+            "slot must not contain the conflict-key delimiter ':'"
+        );
+
+        // N64 controller-pak sidecars likewise get their own labelled slots.
+        let mpk = PathBuf::from("/saves/n64/Mario Kart 64 (USA).mpk");
+        assert_eq!(
+            resolve_slot_name_for_sync("n64", &mpk, "default"),
+            "default (Controller Pak)"
+        );
+
+        // A primary (raw SRAM) is untouched.
+        let sav = PathBuf::from("/saves/snes/Super Mario World.sav");
+        assert_eq!(
+            resolve_slot_name_for_sync("snes", &sav, "default"),
+            "default"
+        );
     }
 
     #[test]

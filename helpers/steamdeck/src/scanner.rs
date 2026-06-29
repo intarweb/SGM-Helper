@@ -903,6 +903,50 @@ fn path_extension(path: &Path) -> Option<String> {
         .map(|value| value.to_ascii_lowercase())
 }
 
+/// Save-format extensions that are SIDECARS — independent companion state that
+/// must never slot-collide with, or overwrite, the primary battery save.
+/// Authoritative set owned by the save-format spec:
+///   rtc — GB/GBC real-time clock (Pokemon Crystal/Gold/Silver, Harvest Moon).
+///   mpk / cpk — N64 Controller-Pak / mempak (separate from the .eep/.fla/.sra
+///               battery save).
+/// Extensible later (e.g. Dreamcast VMU); these three are the in-scope set.
+pub const SIDECAR_FORMATS: [&str; 3] = ["rtc", "mpk", "cpk"];
+
+/// Whether a bare lowercased extension is a sidecar format.
+pub fn is_sidecar(ext: &str) -> bool {
+    SIDECAR_FORMATS.contains(&ext)
+}
+
+/// Download write-guard: may a cloud record of `canonical_format` be written to
+/// a local file of extension `target_ext`? Both are bare lowercased extensions
+/// (matching the RSM `/latest` `format` field and the on-disk target ext).
+///
+/// If EITHER side is a sidecar, the write is allowed ONLY when the formats are
+/// identical — a `.rtc` canonical may land only on a `.rtc` target, never on a
+/// `.srm` (and vice versa). If NEITHER side is a sidecar, the write is always
+/// allowed: primary↔primary differences are legitimate container conversions
+/// (PSX `mcr`→`vmp`, raw `srm`→`sav`) handled elsewhere and must not be blocked.
+pub fn allow_write(canonical_format: &str, target_ext: &str) -> bool {
+    let canonical = canonical_format.to_ascii_lowercase();
+    let target = target_ext.to_ascii_lowercase();
+    if is_sidecar(&canonical) || is_sidecar(&target) {
+        return canonical == target;
+    }
+    true
+}
+
+/// Human-readable slot LABEL for a sidecar extension (save-format spec).
+/// Used to build the RSM-native distinct slot name `"<primary> (<LABEL>)"`.
+/// Returns `None` for non-sidecar extensions.
+pub fn sidecar_label(ext: &str) -> Option<&'static str> {
+    match ext.to_ascii_lowercase().as_str() {
+        "rtc" => Some("RTC"),
+        "mpk" => Some("Controller Pak"),
+        "cpk" => Some("Cartridge Pak"),
+        _ => None,
+    }
+}
+
 fn system_slug_from_rom_extension(ext: String) -> Option<&'static str> {
     match ext.as_str() {
         "nes" | "fds" => Some("nes"),
@@ -2271,6 +2315,48 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
+
+    #[test]
+    fn is_sidecar_matches_the_spec_set() {
+        for ext in ["rtc", "mpk", "cpk"] {
+            assert!(is_sidecar(ext), "{ext} must be a sidecar");
+        }
+        for ext in ["srm", "sav", "mcr", "vmp", "eep", "fla", "sra", "bin"] {
+            assert!(!is_sidecar(ext), "{ext} must NOT be a sidecar");
+        }
+    }
+
+    #[test]
+    fn allow_write_blocks_cross_ext_sidecar_writes() {
+        // A sidecar canonical may only land on a matching-sidecar target.
+        assert!(
+            !allow_write("rtc", "srm"),
+            "rtc->srm must SKIP (the clobber)"
+        );
+        assert!(!allow_write("mpk", "srm"), "mpk->srm must SKIP");
+        assert!(!allow_write("srm", "rtc"), "srm->rtc must SKIP");
+        assert!(allow_write("rtc", "rtc"), "rtc->rtc must ALLOW");
+        assert!(allow_write("mpk", "mpk"), "mpk->mpk must ALLOW");
+    }
+
+    #[test]
+    fn allow_write_never_blocks_primary_to_primary() {
+        // Primary<->primary differences are legitimate container conversions
+        // and must never be blocked by the sidecar guard.
+        assert!(allow_write("srm", "srm"));
+        assert!(
+            allow_write("mcr", "vmp"),
+            "PSX mcr->vmp container conversion must ALLOW"
+        );
+        assert!(allow_write("srm", "sav"), "raw srm->sav must ALLOW");
+        assert!(allow_write("gme", "mcr"));
+    }
+
+    #[test]
+    fn allow_write_is_case_insensitive() {
+        assert!(!allow_write("RTC", "srm"));
+        assert!(allow_write("SRM", "srm"));
+    }
 
     fn set_frame_checksum(bytes: &mut [u8], frame_index: usize) {
         let start = frame_index * PS1_FRAME_SIZE;
