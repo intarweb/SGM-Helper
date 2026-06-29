@@ -1267,10 +1267,11 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
             // canonical layout) up to ~64 bytes for variants with extra
             // metadata. Don't apply the SRAM size profile to it.
             "rtc" => (1..=64).contains(&size),
-            _ => matches!(
-                size,
-                512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768 | 65536
-            ),
+            // Authoritative GB/GBC SRAM sizes (save-format spec): 512B, 2K, 8K,
+            // 32K, 64K, 128K (MBC5 max). Drops non-real power-of-two values and
+            // ADDS 131072 — the old ceiling silently rejected legit 128K MBC5
+            // saves.
+            _ => matches!(size, 512 | 2048 | 8192 | 32768 | 65536 | 131072),
         },
         "gba" => matches!(size, 512 | 8192 | 32768 | 65536 | 131072),
         "n64" => match ext {
