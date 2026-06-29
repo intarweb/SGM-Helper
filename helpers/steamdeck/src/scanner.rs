@@ -545,9 +545,62 @@ pub fn classify_supported_save(
     rom_path: Option<&Path>,
 ) -> Option<SaveClassification> {
     let save_ext = path_extension(save_path)?;
-
     let save_size = save_path.metadata().ok()?.len();
-    if !is_plausible_save_size(save_size) || looks_plain_text(save_path) {
+    let plain_text = looks_plain_text(save_path);
+    classify_core(save_path, save_ext, save_size, plain_text, rom_path)
+}
+
+/// Black-box classification for the verification harness: the system slug plus
+/// the bare lowercased on-disk `format` (ext) and whether it's a sidecar. Driven
+/// from raw bytes (size/content) + the path (name/dir hints) — no filesystem
+/// read — so it is table-driveable against real save fixtures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Classification {
+    pub system: String,
+    pub format: String,
+    pub is_sidecar: bool,
+}
+
+/// Classify a save from its `save_path` (name + directory hints) and its raw
+/// `bytes` (size + plain-text screen). Returns `None` for an unrecognized /
+/// implausible save. The `format` is the bare lowercased extension and matches
+/// RSM's `/latest` `format` field + the on-disk target extension.
+pub fn classify(save_path: &Path, bytes: &[u8]) -> Option<Classification> {
+    let save_ext = path_extension(save_path)?;
+    let classified = classify_core(
+        save_path,
+        save_ext.clone(),
+        bytes.len() as u64,
+        bytes_look_plain_text(bytes),
+        None,
+    )?;
+    Some(Classification {
+        system: classified.system_slug,
+        is_sidecar: is_sidecar(&save_ext),
+        format: save_ext,
+    })
+}
+
+fn bytes_look_plain_text(bytes: &[u8]) -> bool {
+    let sample = &bytes[..bytes.len().min(4096)];
+    if sample.is_empty() || sample.contains(&0) {
+        return false;
+    }
+    let printable = sample
+        .iter()
+        .filter(|value| matches!(**value, b'\n' | b'\r' | b'\t' | 0x20..=0x7e))
+        .count();
+    printable.saturating_mul(100) >= sample.len().saturating_mul(95)
+}
+
+fn classify_core(
+    save_path: &Path,
+    save_ext: String,
+    save_size: u64,
+    plain_text: bool,
+    rom_path: Option<&Path>,
+) -> Option<SaveClassification> {
+    if !is_plausible_save_size(save_size) || plain_text {
         return None;
     }
 
@@ -2356,6 +2409,33 @@ mod tests {
     fn allow_write_is_case_insensitive() {
         assert!(!allow_write("RTC", "srm"));
         assert!(allow_write("SRM", "srm"));
+    }
+
+    #[test]
+    fn classify_reports_system_format_and_sidecar() {
+        // The Crystal clobber case: an 8-byte .rtc sidecar + its 32 KB .srm
+        // primary, classified from path-hint (gbc) + bytes (size).
+        let rtc = classify(
+            Path::new("/saves/gbc/Pokemon - Crystal Version (USA, Europe) (Rev 1).rtc"),
+            &[0u8; 8],
+        )
+        .expect("8-byte .rtc must classify");
+        assert_eq!(rtc.system, "gameboy");
+        assert_eq!(rtc.format, "rtc");
+        assert!(rtc.is_sidecar);
+
+        let srm = classify(
+            Path::new("/saves/gbc/Pokemon - Crystal Version (USA, Europe) (Rev 1).srm"),
+            &vec![0u8; 32768],
+        )
+        .expect("32768-byte .srm must classify");
+        assert_eq!(srm.system, "gameboy");
+        assert_eq!(srm.format, "srm");
+        assert!(!srm.is_sidecar);
+
+        // An 8-byte .srm is NOT a plausible SRAM -> unclassified (size gate),
+        // so the guard can never be fooled into treating a tiny blob as a save.
+        assert!(classify(Path::new("/saves/gbc/Bogus.srm"), &[0u8; 8]).is_none());
     }
 
     fn set_frame_checksum(bytes: &mut [u8], frame_index: usize) {
