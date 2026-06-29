@@ -73,6 +73,12 @@ pub struct LatestSaveResponse {
     pub sha256: Option<String>,
     pub version: Option<i64>,
     pub id: Option<String>,
+    /// Bare lowercased on-disk extension of the canonical record (e.g. "srm",
+    /// "rtc"), from RSM's enriched /latest. Absent on older RSM and on
+    /// exists=false responses — `None` then, which the download guard treats as
+    /// "no cross-ext check" (degrades to prior behavior).
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 #[derive(Debug, Clone)]

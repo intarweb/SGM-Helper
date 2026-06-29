@@ -545,9 +545,62 @@ pub fn classify_supported_save(
     rom_path: Option<&Path>,
 ) -> Option<SaveClassification> {
     let save_ext = path_extension(save_path)?;
-
     let save_size = save_path.metadata().ok()?.len();
-    if !is_plausible_save_size(save_size) || looks_plain_text(save_path) {
+    let plain_text = looks_plain_text(save_path);
+    classify_core(save_path, save_ext, save_size, plain_text, rom_path)
+}
+
+/// Black-box classification for the verification harness: the system slug plus
+/// the bare lowercased on-disk `format` (ext) and whether it's a sidecar. Driven
+/// from raw bytes (size/content) + the path (name/dir hints) — no filesystem
+/// read — so it is table-driveable against real save fixtures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Classification {
+    pub system: String,
+    pub format: String,
+    pub is_sidecar: bool,
+}
+
+/// Classify a save from its `save_path` (name + directory hints) and its raw
+/// `bytes` (size + plain-text screen). Returns `None` for an unrecognized /
+/// implausible save. The `format` is the bare lowercased extension and matches
+/// RSM's `/latest` `format` field + the on-disk target extension.
+pub fn classify(save_path: &Path, bytes: &[u8]) -> Option<Classification> {
+    let save_ext = path_extension(save_path)?;
+    let classified = classify_core(
+        save_path,
+        save_ext.clone(),
+        bytes.len() as u64,
+        bytes_look_plain_text(bytes),
+        None,
+    )?;
+    Some(Classification {
+        system: classified.system_slug,
+        is_sidecar: is_sidecar(&save_ext),
+        format: save_ext,
+    })
+}
+
+fn bytes_look_plain_text(bytes: &[u8]) -> bool {
+    let sample = &bytes[..bytes.len().min(4096)];
+    if sample.is_empty() || sample.contains(&0) {
+        return false;
+    }
+    let printable = sample
+        .iter()
+        .filter(|value| matches!(**value, b'\n' | b'\r' | b'\t' | 0x20..=0x7e))
+        .count();
+    printable.saturating_mul(100) >= sample.len().saturating_mul(95)
+}
+
+fn classify_core(
+    save_path: &Path,
+    save_ext: String,
+    save_size: u64,
+    plain_text: bool,
+    rom_path: Option<&Path>,
+) -> Option<SaveClassification> {
+    if !is_plausible_save_size(save_size) || plain_text {
         return None;
     }
 
@@ -903,6 +956,50 @@ fn path_extension(path: &Path) -> Option<String> {
         .map(|value| value.to_ascii_lowercase())
 }
 
+/// Save-format extensions that are SIDECARS — independent companion state that
+/// must never slot-collide with, or overwrite, the primary battery save.
+/// Authoritative set owned by the save-format spec:
+///   rtc — GB/GBC real-time clock (Pokemon Crystal/Gold/Silver, Harvest Moon).
+///   mpk / cpk — N64 Controller-Pak / mempak (separate from the .eep/.fla/.sra
+///               battery save).
+/// Extensible later (e.g. Dreamcast VMU); these three are the in-scope set.
+pub const SIDECAR_FORMATS: [&str; 3] = ["rtc", "mpk", "cpk"];
+
+/// Whether a bare lowercased extension is a sidecar format.
+pub fn is_sidecar(ext: &str) -> bool {
+    SIDECAR_FORMATS.contains(&ext)
+}
+
+/// Download write-guard: may a cloud record of `canonical_format` be written to
+/// a local file of extension `target_ext`? Both are bare lowercased extensions
+/// (matching the RSM `/latest` `format` field and the on-disk target ext).
+///
+/// If EITHER side is a sidecar, the write is allowed ONLY when the formats are
+/// identical — a `.rtc` canonical may land only on a `.rtc` target, never on a
+/// `.srm` (and vice versa). If NEITHER side is a sidecar, the write is always
+/// allowed: primary↔primary differences are legitimate container conversions
+/// (PSX `mcr`→`vmp`, raw `srm`→`sav`) handled elsewhere and must not be blocked.
+pub fn allow_write(canonical_format: &str, target_ext: &str) -> bool {
+    let canonical = canonical_format.to_ascii_lowercase();
+    let target = target_ext.to_ascii_lowercase();
+    if is_sidecar(&canonical) || is_sidecar(&target) {
+        return canonical == target;
+    }
+    true
+}
+
+/// Human-readable slot LABEL for a sidecar extension (save-format spec).
+/// Used to build the RSM-native distinct slot name `"<primary> (<LABEL>)"`.
+/// Returns `None` for non-sidecar extensions.
+pub fn sidecar_label(ext: &str) -> Option<&'static str> {
+    match ext.to_ascii_lowercase().as_str() {
+        "rtc" => Some("RTC"),
+        "mpk" => Some("Controller Pak"),
+        "cpk" => Some("Cartridge Pak"),
+        _ => None,
+    }
+}
+
 fn system_slug_from_rom_extension(ext: String) -> Option<&'static str> {
     match ext.as_str() {
         "nes" | "fds" => Some("nes"),
@@ -1170,10 +1267,11 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
             // canonical layout) up to ~64 bytes for variants with extra
             // metadata. Don't apply the SRAM size profile to it.
             "rtc" => (1..=64).contains(&size),
-            _ => matches!(
-                size,
-                512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768 | 65536
-            ),
+            // Authoritative GB/GBC SRAM sizes (save-format spec): 512B, 2K, 8K,
+            // 32K, 64K, 128K (MBC5 max). Drops non-real power-of-two values and
+            // ADDS 131072 — the old ceiling silently rejected legit 128K MBC5
+            // saves.
+            _ => matches!(size, 512 | 2048 | 8192 | 32768 | 65536 | 131072),
         },
         "gba" => matches!(size, 512 | 8192 | 32768 | 65536 | 131072),
         "n64" => match ext {
@@ -2271,6 +2369,75 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
+
+    #[test]
+    fn is_sidecar_matches_the_spec_set() {
+        for ext in ["rtc", "mpk", "cpk"] {
+            assert!(is_sidecar(ext), "{ext} must be a sidecar");
+        }
+        for ext in ["srm", "sav", "mcr", "vmp", "eep", "fla", "sra", "bin"] {
+            assert!(!is_sidecar(ext), "{ext} must NOT be a sidecar");
+        }
+    }
+
+    #[test]
+    fn allow_write_blocks_cross_ext_sidecar_writes() {
+        // A sidecar canonical may only land on a matching-sidecar target.
+        assert!(
+            !allow_write("rtc", "srm"),
+            "rtc->srm must SKIP (the clobber)"
+        );
+        assert!(!allow_write("mpk", "srm"), "mpk->srm must SKIP");
+        assert!(!allow_write("srm", "rtc"), "srm->rtc must SKIP");
+        assert!(allow_write("rtc", "rtc"), "rtc->rtc must ALLOW");
+        assert!(allow_write("mpk", "mpk"), "mpk->mpk must ALLOW");
+    }
+
+    #[test]
+    fn allow_write_never_blocks_primary_to_primary() {
+        // Primary<->primary differences are legitimate container conversions
+        // and must never be blocked by the sidecar guard.
+        assert!(allow_write("srm", "srm"));
+        assert!(
+            allow_write("mcr", "vmp"),
+            "PSX mcr->vmp container conversion must ALLOW"
+        );
+        assert!(allow_write("srm", "sav"), "raw srm->sav must ALLOW");
+        assert!(allow_write("gme", "mcr"));
+    }
+
+    #[test]
+    fn allow_write_is_case_insensitive() {
+        assert!(!allow_write("RTC", "srm"));
+        assert!(allow_write("SRM", "srm"));
+    }
+
+    #[test]
+    fn classify_reports_system_format_and_sidecar() {
+        // The Crystal clobber case: an 8-byte .rtc sidecar + its 32 KB .srm
+        // primary, classified from path-hint (gbc) + bytes (size).
+        let rtc = classify(
+            Path::new("/saves/gbc/Pokemon - Crystal Version (USA, Europe) (Rev 1).rtc"),
+            &[0u8; 8],
+        )
+        .expect("8-byte .rtc must classify");
+        assert_eq!(rtc.system, "gameboy");
+        assert_eq!(rtc.format, "rtc");
+        assert!(rtc.is_sidecar);
+
+        let srm = classify(
+            Path::new("/saves/gbc/Pokemon - Crystal Version (USA, Europe) (Rev 1).srm"),
+            &vec![0u8; 32768],
+        )
+        .expect("32768-byte .srm must classify");
+        assert_eq!(srm.system, "gameboy");
+        assert_eq!(srm.format, "srm");
+        assert!(!srm.is_sidecar);
+
+        // An 8-byte .srm is NOT a plausible SRAM -> unclassified (size gate),
+        // so the guard can never be fooled into treating a tiny blob as a save.
+        assert!(classify(Path::new("/saves/gbc/Bogus.srm"), &[0u8; 8]).is_none());
+    }
 
     fn set_frame_checksum(bytes: &mut [u8], frame_index: usize) {
         let start = frame_index * PS1_FRAME_SIZE;
