@@ -19,6 +19,7 @@ pub struct ConfigOverrides {
     pub force_upload: Option<bool>,
     pub dry_run: Option<bool>,
     pub route_prefix: Option<String>,
+    pub secure: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +35,7 @@ pub struct AppConfig {
     pub force_upload: bool,
     pub dry_run: bool,
     pub route_prefix: String,
+    pub secure: bool,
     pub binary_dir: PathBuf,
     pub config_path: PathBuf,
 }
@@ -70,7 +72,8 @@ impl LoadedConfig {
 
 impl AppConfig {
     pub fn base_url(&self) -> String {
-        format!("http://{}:{}", self.url, self.port)
+        let scheme = if self.secure { "https" } else { "http" };
+        format!("{}://{}:{}", scheme, self.url, self.port)
     }
 
     pub fn resolved_root(&self) -> Result<PathBuf> {
@@ -164,6 +167,7 @@ impl AppConfig {
             "ROUTE_PREFIX",
             "",
         )?);
+        let secure = choose_bool(overrides.secure, env_values, ini_values, "SECURE", false)?;
 
         if watch_interval == 0 {
             bail!("WATCH_INTERVAL moet >= 1 zijn");
@@ -181,6 +185,7 @@ impl AppConfig {
             force_upload,
             dry_run,
             route_prefix,
+            secure,
             binary_dir,
             config_path: config_path.to_path_buf(),
         })
@@ -496,6 +501,34 @@ SAVE_PATH="/home/snes9x/save"
         )
         .unwrap();
         assert_eq!(cfg.base_url(), "http://192.168.1.9:9096");
+    }
+
+    #[test]
+    fn base_url_uses_https_when_secure_true() {
+        let cfg = test_sources(
+            ConfigOverrides::default(),
+            &[
+                ("URL", "saves.example.com"),
+                ("PORT", "443"),
+                ("SECURE", "true"),
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(cfg.base_url(), "https://saves.example.com:443");
+        assert!(cfg.secure);
+    }
+
+    #[test]
+    fn base_url_remains_http_when_secure_unset_for_backwards_compat() {
+        let cfg = test_sources(
+            ConfigOverrides::default(),
+            &[("URL", "192.168.1.9"), ("PORT", "9096")],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(cfg.base_url(), "http://192.168.1.9:9096");
+        assert!(!cfg.secure);
     }
 
     #[test]
