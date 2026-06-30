@@ -2819,10 +2819,9 @@ pub(crate) fn resolve_slot_name_for_sync(
         .extension()
         .and_then(|value| value.to_str())
         .map(|value| value.to_ascii_lowercase())
+        && let Some(label) = sidecar_label(&ext)
     {
-        if let Some(label) = sidecar_label(&ext) {
-            return format!("{base} ({label})");
-        }
+        return format!("{base} ({label})");
     }
     base
 }
