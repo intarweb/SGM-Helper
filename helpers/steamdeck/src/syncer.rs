@@ -15,7 +15,7 @@ use crate::scanner::{
     RomIndexEntry, SaveAdapterProfile, SaveContainerFormat, allow_write, classify_supported_save,
     discover_rom_index, discover_save_files, dreamcast_skip_reason,
     encode_download_for_local_container, filename_stem, md5_file, normalize_save_bytes_for_sync,
-    normalize_save_for_sync, saturn_skip_reason, sha1_file, sha256_bytes, sidecar_label,
+    normalize_save_for_sync, saturn_skip_reason, sha1_file, sha256_bytes, sidecar_label, is_sidecar,
     wii_skip_reason, wii_title_code_from_path,
 };
 use crate::sources::{EmulatorProfile, SourceKind, prepare_sources_for_sync};
@@ -672,6 +672,14 @@ fn restore_single_cloud_save(
         .system_profile_value
         .as_deref()
         .or(runtime_target.runtime_profile.as_deref());
+    // The cloud track's own format-class (primary vs sidecar), from its stored
+    // filename ext — gates the "already present" checks below so a local file of
+    // the OTHER class never satisfies this track's restore.
+    let cloud_is_sidecar = std::path::Path::new(&cloud_save.filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| is_sidecar(&value.to_ascii_lowercase()))
+        .unwrap_or(false);
     let target_extension = cloud_target_extension(cloud_save, runtime_profile);
     let provisional_path = cloud_target_path(
         cloud_save,
@@ -682,7 +690,7 @@ fn restore_single_cloud_save(
         target_extension.as_deref(),
     );
 
-    if existing_local_save_is_valid(&provisional_path, &system_slug) {
+    if existing_local_save_is_valid(&provisional_path, &system_slug, cloud_is_sidecar) {
         return Ok(());
     }
 
@@ -694,7 +702,7 @@ fn restore_single_cloud_save(
         cloud_save,
     );
     if native_target_path != provisional_path
-        && existing_local_save_is_valid(&native_target_path, &system_slug)
+        && existing_local_save_is_valid(&native_target_path, &system_slug, cloud_is_sidecar)
     {
         return Ok(());
     }
@@ -759,7 +767,7 @@ fn restore_single_cloud_save(
         Some(downloaded_bytes.len() as u64),
     );
 
-    if existing_local_save_is_valid(&target_path, &system_slug) {
+    if existing_local_save_is_valid(&target_path, &system_slug, cloud_is_sidecar) {
         return Ok(());
     }
     if !target_parent_allowed(&target_path, save_roots, create_missing_system_dirs) {
@@ -1095,9 +1103,22 @@ fn wii_title_code_from_candidate(candidate: &str) -> Option<String> {
     None
 }
 
-fn existing_local_save_is_valid(path: &Path, system_slug: &str) -> bool {
+fn existing_local_save_is_valid(path: &Path, system_slug: &str, expect_sidecar: bool) -> bool {
     if system_slug == "ports" {
         return path.is_file() && path.metadata().map(|meta| meta.len() > 0).unwrap_or(false);
+    }
+    // Format-class gate: a local file only satisfies a cloud track's "already
+    // present" check if it's the SAME class (primary vs sidecar). A sidecar
+    // (.rtc/.mpk/.cpk) must never satisfy a primary track's restore, nor vice
+    // versa — otherwise a present sidecar suppresses the primary's re-restore (the
+    // restore-completeness bug). Class is intrinsic to the on-disk ext.
+    let local_is_sidecar = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| is_sidecar(&value.to_ascii_lowercase()))
+        .unwrap_or(false);
+    if local_is_sidecar != expect_sidecar {
+        return false;
     }
     path.exists()
         && classify_supported_save(path, None)
@@ -4283,6 +4304,27 @@ mod tests {
         let body = format!("pid={}\nstarted_at=2026-06-06T13:29:25Z\n", pid);
         fs::write(&path, &body).unwrap();
         assert_eq!(classify_existing_lock(&path, &body), StaleVerdict::Active);
+    }
+
+    #[test]
+    fn existing_local_save_class_gate_rejects_cross_class() {
+        // Restore-completeness fix: a local file satisfies a cloud track's
+        // "already present" check only if it's the SAME format-class. The class
+        // gate short-circuits before any filesystem/classify work, so a
+        // cross-class path is rejected regardless of existence.
+        // A present sidecar (.rtc) must NOT satisfy a PRIMARY track's restore
+        // (this is the bug: it let a kept .rtc suppress the lost .srm's restore):
+        assert!(!existing_local_save_is_valid(
+            std::path::Path::new("/saves/gbc/Pokemon - Crystal Version.rtc"),
+            "gameboy",
+            false,
+        ));
+        // ...and a present primary (.srm) must NOT satisfy a SIDECAR track's:
+        assert!(!existing_local_save_is_valid(
+            std::path::Path::new("/saves/gbc/Pokemon - Crystal Version.srm"),
+            "gameboy",
+            true,
+        ));
     }
 
     #[test]
