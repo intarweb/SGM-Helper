@@ -641,6 +641,14 @@ fn restore_single_cloud_save(
     );
 
     if existing_local_save_is_valid(&provisional_path, &system_slug) {
+        if verbose {
+            eprintln!(
+                "Skipping cloud {} save '{}': a valid local save is already present at {}",
+                system_slug,
+                cloud_save.display_name(),
+                provisional_path.display()
+            );
+        }
         return Ok(());
     }
 
@@ -654,6 +662,14 @@ fn restore_single_cloud_save(
     if native_target_path != provisional_path
         && existing_local_save_is_valid(&native_target_path, &system_slug)
     {
+        if verbose {
+            eprintln!(
+                "Skipping cloud {} save '{}': a valid local save is already present at the native target {}",
+                system_slug,
+                cloud_save.display_name(),
+                native_target_path.display()
+            );
+        }
         return Ok(());
     }
     if !target_parent_allowed(&provisional_path, save_roots, create_missing_system_dirs) {
@@ -671,10 +687,26 @@ fn restore_single_cloud_save(
 
     let provisional_key = provisional_path.to_string_lossy().to_string();
     if restored_targets.contains(&provisional_key) {
+        if verbose {
+            eprintln!(
+                "Skipping cloud {} save '{}': target {} was already restored earlier in this scan",
+                system_slug,
+                cloud_save.display_name(),
+                provisional_key
+            );
+        }
         return Ok(());
     }
     let native_target_key = native_target_path.to_string_lossy().to_string();
     if native_target_key != provisional_key && restored_targets.contains(&native_target_key) {
+        if verbose {
+            eprintln!(
+                "Skipping cloud {} save '{}': native target {} was already restored earlier in this scan",
+                system_slug,
+                cloud_save.display_name(),
+                native_target_key
+            );
+        }
         return Ok(());
     }
 
@@ -718,6 +750,14 @@ fn restore_single_cloud_save(
     );
 
     if existing_local_save_is_valid(&target_path, &system_slug) {
+        if verbose {
+            eprintln!(
+                "Skipping cloud {} save '{}': a valid local save is already present at the final target {}",
+                system_slug,
+                cloud_save.display_name(),
+                target_path.display()
+            );
+        }
         return Ok(());
     }
     if !target_parent_allowed(&target_path, save_roots, create_missing_system_dirs) {
@@ -735,6 +775,14 @@ fn restore_single_cloud_save(
 
     let target_key = target_path.to_string_lossy().to_string();
     if restored_targets.contains(&target_key) {
+        if verbose {
+            eprintln!(
+                "Skipping cloud {} save '{}': final target {} was already restored earlier in this scan",
+                system_slug,
+                cloud_save.display_name(),
+                target_key
+            );
+        }
         return Ok(());
     }
 
