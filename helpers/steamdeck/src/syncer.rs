@@ -908,6 +908,17 @@ fn cloud_target_extension(
     cloud_save: &CloudSaveSummary,
     runtime_profile: Option<&str>,
 ) -> Option<String> {
+    // SIDECAR GUARD (GBC-RTC clobber fix): a sidecar save (rtc/mpk/cpk) must restore to
+    // its OWN extension, never the runtime download-profile primary target_extension.
+    // Without this, a profile such as gameboy/retroarch-gambatte (target .srm) maps an
+    // .rtc sidecar onto the .srm PRIMARY target on restore and overwrites the real save.
+    // The cloud record has no `format` field, so sidecar-ness is derived from the filename.
+    if let Some(ext) = extension_from_filename(&cloud_save.filename)
+        && is_sidecar(&ext)
+    {
+        return Some(ext);
+    }
+
     if let Some(runtime_profile) = runtime_profile
         && let Some(profile) = cloud_save.download_profiles.iter().find(|profile| {
             profile.id.eq_ignore_ascii_case(runtime_profile)
@@ -4037,6 +4048,35 @@ mod tests {
             filename_with_extension("mk64_1.cpk", "mpk").as_deref(),
             Some("mk64_1.mpk")
         );
+    }
+
+    #[test]
+    fn cloud_restore_sidecar_rtc_keeps_own_ext_not_profile_srm() {
+        // GBC-RTC clobber guard: an .rtc sidecar whose retroarch download-profile targets
+        // .srm must restore to .rtc, NEVER .srm \u2014 else the 8B rtc overwrites the cart .srm.
+        let save = cloud_save(
+            "Pokemon - Crystal Version (USA, Europe) (Rev 1).rtc",
+            "Pokemon - Crystal Version",
+            "gameboy",
+            "gameboy/retroarch-gambatte",
+            ".srm",
+        );
+        let ext = cloud_target_extension(&save, Some("gameboy/retroarch-gambatte"));
+        assert_eq!(ext.as_deref(), Some("rtc"), "sidecar must keep .rtc, not profile .srm");
+    }
+
+    #[test]
+    fn cloud_restore_primary_srm_still_honors_profile_ext() {
+        // No regression: a real .srm primary still maps to the profile target ext.
+        let save = cloud_save(
+            "Pokemon - Crystal Version (USA, Europe) (Rev 1).srm",
+            "Pokemon - Crystal Version",
+            "gameboy",
+            "gameboy/retroarch-gambatte",
+            ".srm",
+        );
+        let ext = cloud_target_extension(&save, Some("gameboy/retroarch-gambatte"));
+        assert_eq!(ext.as_deref(), Some("srm"), "primary uses the profile ext");
     }
 
     #[test]
