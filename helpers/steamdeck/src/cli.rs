@@ -143,6 +143,26 @@ pub enum Commands {
         #[arg(long = "poll-interval", default_value_t = 5)]
         poll_interval: u64,
     },
+    /// Black-box decision dump for the save-format verification harness: for each
+    /// fixture, print classify (system/format/sidecar), upload-slot, the simulated
+    /// cloud-latest format, the write-guard verdict (allow/skip) and the target.
+    /// Drives the REAL classify / slot / guard code over real save fixtures + a
+    /// simulated cloud-latest state — no network, no sync, deterministic.
+    ExplainSync {
+        /// Directory of save fixtures. Lay them under system-hinted subdirs
+        /// (e.g. `gbc/`, `n64/`, `psx/`) — the classifier resolves the system
+        /// from the path. Also holds `fixtures-manifest.tsv`
+        /// (`<relpath>\t<lower-identity>` per line) unless --manifest overrides.
+        #[arg(long = "fixtures-dir")]
+        fixtures_dir: PathBuf,
+        /// JSON map keyed `<identity>::<slotName>` -> the /latest object
+        /// (`{exists, format?, version?, id?}`): the simulated cloud state.
+        #[arg(long = "cloud-state")]
+        cloud_state: PathBuf,
+        /// Manifest path override (default `<fixtures-dir>/fixtures-manifest.tsv`).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

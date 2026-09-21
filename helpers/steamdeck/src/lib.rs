@@ -52,6 +52,17 @@ pub fn run() -> Result<()> {
         bail!("`--verbose` en `--quiet` kunnen niet tegelijk actief zijn");
     }
 
+    // The verification harness is fully offline (no eGauge config / auth): handle
+    // it before any config load so it runs anywhere with just the fixtures.
+    if let Commands::ExplainSync {
+        fixtures_dir,
+        cloud_state,
+        manifest,
+    } = &cli.command
+    {
+        return run_explain_sync(fixtures_dir, cloud_state, manifest.as_deref());
+    }
+
     let global_overrides = ConfigOverrides {
         url: cli.url.clone(),
         api_url: cli.api_url.clone(),
@@ -687,8 +698,103 @@ fn dispatch(cli: Cli, loaded: LoadedConfig) -> Result<()> {
             let cfg = loaded.config.clone();
             run_device_auth(&cfg, poll_interval, cli.quiet)?;
         }
+        Commands::ExplainSync { .. } => unreachable!("handled offline in run()"),
     }
 
+    Ok(())
+}
+
+/// Black-box decision dump for the save-format verification harness. For each
+/// fixture (named in `<fixtures-dir>/fixtures-manifest.tsv` as
+/// `<filename>\t<lower-identity>`), drive the REAL classify / slot / write-guard
+/// code over the file's bytes + a simulated cloud-latest state, and print one
+/// tab-separated decision row. No network, no sync — deterministic, so a fixture
+/// matrix can assert the bytes never get clobbered or mis-routed.
+fn run_explain_sync(
+    fixtures_dir: &Path,
+    cloud_state: &Path,
+    manifest: Option<&Path>,
+) -> Result<()> {
+    use std::collections::BTreeMap;
+
+    let manifest_path = manifest.map_or_else(
+        || fixtures_dir.join("fixtures-manifest.tsv"),
+        Path::to_path_buf,
+    );
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading manifest {}", manifest_path.display()))?;
+    let mut identities: BTreeMap<String, String> = BTreeMap::new();
+    for line in manifest_text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.splitn(2, '\t');
+        if let (Some(file), Some(identity)) = (parts.next(), parts.next()) {
+            identities.insert(
+                file.trim().to_string(),
+                identity.trim().to_ascii_lowercase(),
+            );
+        }
+    }
+
+    let cloud_text = fs::read_to_string(cloud_state)
+        .with_context(|| format!("reading cloud-state {}", cloud_state.display()))?;
+    let cloud: serde_json::Value = serde_json::from_str(&cloud_text)
+        .with_context(|| format!("parsing cloud-state JSON {}", cloud_state.display()))?;
+
+    println!(
+        "# explain-sync: {} fixture(s) from {}",
+        identities.len(),
+        fixtures_dir.display()
+    );
+    println!("file\tsystem\tformat\tsidecar\tupload_slot\tcloud_key\tcloud_format\tguard");
+    for (file, identity) in &identities {
+        let path = fixtures_dir.join(file);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                println!("{file}\t<read-error: {err}>");
+                continue;
+            }
+        };
+        let Some(classification) = crate::scanner::classify(&path, &bytes) else {
+            println!("{file}\t<unclassified>\t-\t-\t-\t-\t-\t-");
+            continue;
+        };
+        let slot =
+            crate::syncer::resolve_slot_name_for_sync(&classification.system, &path, "default");
+        let key = format!("{identity}::{slot}");
+        let entry = cloud.get(&key);
+        let exists = entry
+            .and_then(|value| value.get("exists"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let cloud_format = entry
+            .and_then(|value| value.get("format"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_ascii_lowercase);
+        let guard = match (exists, cloud_format.as_deref()) {
+            (true, Some(canonical)) => {
+                if crate::scanner::allow_write(canonical, &classification.format) {
+                    "ALLOW"
+                } else {
+                    "SKIP"
+                }
+            }
+            _ => "n/a (no canonical)",
+        };
+        println!(
+            "{file}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            classification.system,
+            classification.format,
+            classification.is_sidecar,
+            slot,
+            key,
+            cloud_format.as_deref().unwrap_or("-"),
+            guard,
+        );
+    }
     Ok(())
 }
 
