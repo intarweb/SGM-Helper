@@ -11,6 +11,7 @@ use crate::api::{
 use crate::backend_config::sync_config_with_backend;
 use crate::config::AppConfig;
 use crate::scanner::{
+    sha256_file,
     RomIndexEntry, SaveAdapterProfile, SaveContainerFormat, classify_supported_save,
     discover_rom_index, discover_save_files, dreamcast_skip_reason,
     encode_download_for_local_container, filename_stem, md5_file, normalize_save_bytes_for_sync,
@@ -18,7 +19,8 @@ use crate::scanner::{
     wii_title_code_from_path,
 };
 use crate::sources::{EmulatorProfile, SourceKind, prepare_sources_for_sync};
-use crate::state::{AuthState, SyncedEntry, load_sync_state, now_rfc3339, save_sync_state};
+use crate::state::{
+    TerminalRejection,AuthState, SyncedEntry, load_sync_state, now_rfc3339, save_sync_state};
 
 #[derive(Debug, Clone)]
 pub struct SyncOptions {
@@ -39,6 +41,9 @@ pub struct SyncReport {
     pub in_sync: usize,
     pub conflicts: usize,
     pub skipped: usize,
+    /// Saves the server refused permanently. Not re-attempted until the
+    /// payload changes.
+    pub rejected_permanent: usize,
     pub errors: usize,
 }
 
@@ -180,6 +185,21 @@ pub fn run_sync(
             }
 
             let save_key = save_path.to_string_lossy().to_string();
+            if let Some(prior) = sync_state.terminal_rejections.get(&save_key)
+                && sha256_file(&save_path)
+                    .map(|current| current == prior.sha256)
+                    .unwrap_or(false)
+            {
+                report.rejected_permanent += 1;
+                eprintln!(
+                    "Not retrying {}: the server refused it with {}{}",
+                    save_path.display(),
+                    prior.status,
+                    if prior.reason.is_empty() { String::new() } else { format!(": {}", prior.reason) }
+                );
+                continue;
+            }
+
             let process_result = process_single_save(
                 &api,
                 &save_path,
@@ -212,6 +232,18 @@ pub fn run_sync(
                     report.errors += 1;
                     if verbose {
                         eprintln!("Sync error for {}: {}", save_path.display(), err);
+                    }
+                    if let Some(status) = permanent_rejection_status(&err) {
+                        let sha = sha256_file(&save_path).unwrap_or_default();
+                        sync_state.terminal_rejections.insert(
+                            save_key.clone(),
+                            TerminalRejection {
+                                sha256: sha,
+                                status,
+                                reason: format!("{err:#}"),
+                                recorded_at: now_rfc3339(),
+                            },
+                        );
                     }
                 }
             }
@@ -306,6 +338,20 @@ pub fn run_sync(
 
 fn path_is_under_roots(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path.starts_with(root))
+}
+
+/// A 4xx says the request itself was refused, so retrying identical bytes
+/// cannot succeed. 408 and 429 are the exceptions: a timeout or a rate limit
+/// means "later", not "no".
+fn permanent_rejection_status(err: &anyhow::Error) -> Option<u16> {
+    let message = format!("{err:#}").to_ascii_lowercase();
+    let start = message.find("status=")? + "status=".len();
+    let code: u16 = message[start..].split_whitespace().next()?.parse().ok()?;
+    if (400..500).contains(&code) && code != 408 && code != 429 {
+        Some(code)
+    } else {
+        None
+    }
 }
 
 fn source_allows_system(source_systems: &[String], system_slug: &str) -> bool {
