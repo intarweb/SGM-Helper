@@ -582,7 +582,10 @@ pub fn classify_supported_save(
     }
 
     let save_lower = save_path.to_string_lossy().to_ascii_lowercase();
-    if contains_any(&save_lower, &["gameboy advance", "/gba/", "\\gba\\"]) {
+    if contains_any(
+        &save_lower,
+        &["gameboy advance", "game boy advance", "/gba/", "\\gba\\"],
+    ) {
         if is_plausible_save_for_system(&save_ext, save_size, "gba") {
             return classify_if_valid(
                 save_path,
@@ -640,7 +643,11 @@ pub fn classify_supported_save(
             "nintendo",
         ],
     ) {
-        let slug = infer_nintendo_slug(&save_lower);
+        let Some(slug) = infer_nintendo_slug(&save_lower) else {
+            // No core name matched: leave the save unclassified rather than
+            // labelling it Game Boy, which is a wrong answer rather than a missing one.
+            return None;
+        };
         if is_plausible_save_for_system(&save_ext, save_size, slug) {
             return classify_if_valid(
                 save_path,
@@ -872,32 +879,48 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
 
-fn infer_nintendo_slug(haystack: &str) -> &'static str {
+fn infer_nintendo_slug(haystack: &str) -> Option<&'static str> {
     if contains_any(
         haystack,
         &["nintendo wii", "/wii/", "\\wii\\", "dolphin", "rvl"],
     ) {
-        return "wii";
+        return Some("wii");
     }
-    if contains_any(haystack, &["gameboy advance", "/gba/", "\\gba\\"]) {
-        return "gba";
+    if contains_any(
+        haystack,
+        &[
+            "gameboy advance",
+            "game boy advance",
+            "visualboyadvance",
+            "vba",
+            "/gba/",
+            "\\gba\\",
+        ],
+    ) {
+        return Some("gba");
+    }
+    if contains_any(
+        haystack,
+        &["game boy", "gameboy", "/gb/", "\\gb\\", "/gbc/", "\\gbc\\"],
+    ) {
+        return Some("gameboy");
     }
     if contains_any(haystack, &["nintendo ds", "/nds/", "\\nds\\"]) {
-        return "nds";
+        return Some("nds");
     }
     if contains_any(haystack, &["nintendo 64", "/n64/", "\\n64\\"]) {
-        return "n64";
+        return Some("n64");
     }
     if contains_any(
         haystack,
         &["super nintendo", "/snes/", "\\snes\\", "/sfc/", "\\sfc\\"],
     ) {
-        return "snes";
+        return Some("snes");
     }
     if contains_any(haystack, &["famicom", "/nes/", "\\nes\\"]) {
-        return "nes";
+        return Some("nes");
     }
-    "gameboy"
+    None
 }
 
 fn infer_sega_slug(haystack: &str) -> &'static str {
@@ -2438,6 +2461,57 @@ mod tests {
         fs::write(&save, [0x00u8; 1024]).unwrap();
 
         assert!(infer_supported_console_slug(&save, None).is_none());
+    }
+
+    #[test]
+    fn game_boy_path_hints_classify_as_gameboy() {
+        let tmp = tempfile::tempdir().unwrap();
+        for hint in ["saves/Game Boy", "saves/gb", "saves/Game Boy Color"] {
+            let save = tmp.path().join(hint).join("Pokemon Red.sav");
+            fs::create_dir_all(save.parent().unwrap()).unwrap();
+            fs::write(&save, [0x00u8; 32768]).unwrap();
+
+            assert_eq!(
+                infer_supported_console_slug(&save, None).as_deref(),
+                Some("gameboy"),
+                "{hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn game_boy_advance_path_hints_classify_as_gba() {
+        let tmp = tempfile::tempdir().unwrap();
+        for hint in [
+            "saves/Game Boy Advance",
+            "saves/gba",
+            "saves/VisualBoyAdvance",
+        ] {
+            let save = tmp.path().join(hint).join("Metroid Fusion.sav");
+            fs::create_dir_all(save.parent().unwrap()).unwrap();
+            fs::write(&save, [0x00u8; 32768]).unwrap();
+
+            assert_eq!(
+                infer_supported_console_slug(&save, None).as_deref(),
+                Some("gba"),
+                "{hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn nintendo_hint_without_a_known_system_is_unclassified() {
+        let tmp = tempfile::tempdir().unwrap();
+        for hint in ["saves/Nintendo", "saves/ryujinx"] {
+            let save = tmp.path().join(hint).join("Pokemon.sav");
+            fs::create_dir_all(save.parent().unwrap()).unwrap();
+            fs::write(&save, [0x00u8; 32768]).unwrap();
+
+            assert!(
+                infer_supported_console_slug(&save, None).is_none(),
+                "{hint}"
+            );
+        }
     }
 
     #[test]
