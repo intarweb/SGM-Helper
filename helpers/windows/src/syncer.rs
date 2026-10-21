@@ -326,23 +326,34 @@ pub fn run_sync(
             }
 
             let save_key = save_path.to_string_lossy().to_string();
-            if let Some(prior) = sync_state.terminal_rejections.get(&save_key)
-                && sha256_file(&save_path)
-                    .map(|current| current == prior.sha256)
-                    .unwrap_or(false)
-            {
-                report.rejected_permanent += 1;
-                eprintln!(
-                    "Not retrying {}: the server refused it with {}{}",
-                    save_path.display(),
-                    prior.status,
-                    if prior.reason.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {}", prior.reason)
-                    }
-                );
-                continue;
+            let prior_rejection = sync_state
+                .terminal_rejections
+                .get(&save_key)
+                .cloned()
+                .filter(|prior| {
+                    sha256_file(&save_path)
+                        .map(|current| current == prior.sha256)
+                        .unwrap_or(false)
+                });
+            // A marker recorded for a routing failure says nothing about the save, so
+            // drop it and process the save again.  Devices that ran the older build
+            // carry those markers in their state already.
+            if let Some(prior) = prior_rejection {
+                if carries_save_scoped_refusal(&prior.reason) {
+                    report.rejected_permanent += 1;
+                    eprintln!(
+                        "Not retrying {}: the server refused it with {}{}",
+                        save_path.display(),
+                        prior.status,
+                        if prior.reason.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", prior.reason)
+                        }
+                    );
+                    continue;
+                }
+                sync_state.terminal_rejections.remove(&save_key);
             }
 
             let process_result = process_single_save(
@@ -485,14 +496,43 @@ fn path_is_under_roots(path: &Path, roots: &[PathBuf]) -> bool {
 /// cannot succeed. 408 and 429 are the exceptions: a timeout or a rate limit
 /// means "later", not "no".
 fn permanent_rejection_status(err: &anyhow::Error) -> Option<u16> {
-    let message = format!("{err:#}").to_ascii_lowercase();
-    let start = message.find("status=")? + "status=".len();
-    let code: u16 = message[start..].split_whitespace().next()?.parse().ok()?;
-    if (400..500).contains(&code) && code != 408 && code != 429 {
-        Some(code)
-    } else {
-        None
+    let message = format!("{err:#}");
+    let lowered = message.to_ascii_lowercase();
+    let start = lowered.find("status=")? + "status=".len();
+    let code: u16 = lowered[start..].split_whitespace().next()?.parse().ok()?;
+    if !(400..500).contains(&code) || code == 408 || code == 429 {
+        return None;
     }
+    if !carries_save_scoped_refusal(&message) {
+        return None;
+    }
+    Some(code)
+}
+
+/// Whether a failed request carries the server's refusal of *this save*.
+///
+/// Only a structured body names a save-level reason.  A routing or transport
+/// failure -- a proxy's 404, the bare "404 page not found" a Go mux returns for
+/// an unrouted path, an empty 5xx -- says nothing about the save, and treating
+/// one as terminal marks every save in a pass as permanently refused the first
+/// time the server or a route in front of it is misconfigured.
+fn carries_save_scoped_refusal(message: &str) -> bool {
+    let Some((_, body)) = message.split_once("body=") else {
+        return false;
+    };
+    // The body is truncated when recorded, so a long one fails to parse; that
+    // leaves the save retryable, which is the safe direction.
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body.trim()) else {
+        return false;
+    };
+    ["reason", "message", "errorMessage", "error"]
+        .iter()
+        .any(|key| {
+            value
+                .get(key)
+                .and_then(|entry| entry.as_str())
+                .is_some_and(|entry| !entry.trim().is_empty())
+        })
 }
 
 fn source_allows_system(source_systems: &[String], system_slug: &str) -> bool {
@@ -3908,5 +3948,40 @@ mod tests {
 
         drop(lock);
         assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn a_routing_failure_is_not_a_permanent_rejection() {
+        let err =
+            anyhow::anyhow!("HTTP request faalde: status=404 Not Found body=404 page not found");
+        assert_eq!(permanent_rejection_status(&err), None);
+    }
+
+    #[test]
+    fn a_reasoned_refusal_is_still_a_permanent_rejection() {
+        let err = anyhow::anyhow!(
+            r#"HTTP request faalde: status=422 Unprocessable Entity body={{"success":false,"reason":"snes raw save payload is blank"}}"#
+        );
+        assert_eq!(permanent_rejection_status(&err), Some(422));
+    }
+
+    #[test]
+    fn a_client_error_without_a_body_is_retryable() {
+        let err = anyhow::anyhow!("HTTP request faalde: status=400 Bad Request body=");
+        assert_eq!(permanent_rejection_status(&err), None);
+    }
+
+    #[test]
+    fn a_client_error_with_an_unstructured_body_is_retryable() {
+        let err = anyhow::anyhow!("HTTP request faalde: status=412 Precondition Failed body=no");
+        assert_eq!(permanent_rejection_status(&err), None);
+    }
+
+    #[test]
+    fn a_server_error_is_retryable() {
+        let err = anyhow::anyhow!(
+            r#"HTTP request faalde: status=503 Service Unavailable body={{"reason":"down"}}"#
+        );
+        assert_eq!(permanent_rejection_status(&err), None);
     }
 }

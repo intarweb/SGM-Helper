@@ -643,3 +643,226 @@ fn sync_auto_enrolls_when_gate_is_open_without_login() {
     let auth: Value = serde_json::from_str(&fs::read_to_string(auth_path).unwrap()).unwrap();
     assert_eq!(auth["token"], "RSM-AAAA-BBBB");
 }
+
+#[test]
+fn a_routing_error_does_not_make_a_save_terminal() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_rt","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"rt@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"rtsha","md5":"rtmd5"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    // A misrouted request: the bare body a Go mux returns, naming no save.
+    let upload_routed_away = server.mock(|when, then| {
+        when.method(POST).path("/saves").body_includes("broken.sav");
+        then.status(404)
+            .header("content-type", "text/plain")
+            .body("404 page not found");
+    });
+    let upload_ok = server.mock(|when, then| {
+        when.method(POST)
+            .path("/saves")
+            .body_includes("healthy.sav");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-rt","sha256":"sha-up"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Nintendo/Game Boy")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("Nintendo/Game Boy/broken.sav"),
+        vec![0x01u8; 32768],
+    )
+    .unwrap();
+    fs::write(
+        root.join("Nintendo/Game Boy/healthy.sav"),
+        // Not a printable byte: a payload of ASCII space-and-above is treated
+        // as a text file and never classified as a save.
+        vec![0x11u8; 32768],
+    )
+    .unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    Command::cargo_bin("sgm-mister-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("rt@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+
+    let first = Command::cargo_bin("sgm-mister-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let first_stdout = String::from_utf8_lossy(&first.stdout);
+
+    assert!(first.status.success(), "first sync failed: {first_stdout}");
+    assert_eq!(
+        upload_routed_away.calls(),
+        1,
+        "the misrouted save was never attempted: {first_stdout}"
+    );
+    assert!(
+        first_stdout.contains("rejected_permanent=0"),
+        "a routing failure was recorded as a permanent rejection: {first_stdout}"
+    );
+    assert!(
+        upload_ok.calls() == 1,
+        "a healthy save in the same pass did not sync: {first_stdout}"
+    );
+
+    let second = Command::cargo_bin("sgm-mister-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let second_stdout = String::from_utf8_lossy(&second.stdout);
+
+    assert!(
+        second.status.success(),
+        "second sync failed: {second_stdout}"
+    );
+    assert_eq!(
+        upload_routed_away.calls(),
+        2,
+        "the save was not retried after a routing failure: {second_stdout}"
+    );
+    assert!(
+        second_stdout.contains("rejected_permanent=0"),
+        "a routing failure survived into the next pass as terminal: {second_stdout}"
+    );
+}
+
+#[test]
+fn a_stale_routing_marker_is_dropped_and_the_save_retried() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_st","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"st@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"stsha","md5":"stmd5"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-st","sha256":"sha-up"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Nintendo/Game Boy")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let save = root.join("Nintendo/Game Boy/wario.sav");
+    fs::write(&save, vec![0xaau8; 32768]).unwrap();
+
+    // What the older build left behind: a marker for a bare routing 404.
+    let state = serde_json::json!({
+        "entries": {},
+        "terminal_rejections": {
+            save.to_string_lossy().to_string(): {
+                "sha256": "8bee41c7e371d35c63d39a502b41e0d2ff0f3453d9aa1bb90a33046a0a002b24",
+                "status": 404,
+                "reason": "HTTP request faalde: status=404 Not Found body=404 page not found",
+                "recorded_at": "2026-10-20T00:00:00Z"
+            }
+        }
+    });
+    fs::write(
+        state_dir.join("sync_state.json"),
+        serde_json::to_vec(&state).unwrap(),
+    )
+    .unwrap();
+
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    Command::cargo_bin("sgm-mister-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("st@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin("sgm-mister-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "sync failed: {stdout}");
+    assert_eq!(
+        upload.calls(),
+        1,
+        "the save was still treated as permanently refused: {stdout}"
+    );
+    assert!(
+        stdout.contains("rejected_permanent=0"),
+        "a stale routing marker was counted as a real refusal: {stdout}"
+    );
+
+    let written = fs::read_to_string(state_dir.join("sync_state.json")).unwrap();
+    assert!(
+        !written.contains("404 page not found"),
+        "the stale routing marker is still in the state file: {written}"
+    );
+}
