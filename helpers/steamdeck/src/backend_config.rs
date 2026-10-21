@@ -807,6 +807,11 @@ fn write_file(path: &Path, content: &str) -> Result<()> {
         .with_context(|| format!("kan config niet schrijven: {}", path.display()))
 }
 
+/// How many timestamped config snapshots to keep. The live config is the
+/// authority; these snapshots exist so a bad backend write-back can be read
+/// back, and an unbounded number of them fills the device.
+const CONFIG_BACKUP_RETENTION: usize = 10;
+
 fn backup_config_if_exists(path: &Path) -> Result<Option<PathBuf>> {
     if !path.exists() {
         return Ok(None);
@@ -819,7 +824,58 @@ fn backup_config_if_exists(path: &Path) -> Result<Option<PathBuf>> {
             backup.display()
         )
     })?;
+    prune_config_backups(path, CONFIG_BACKUP_RETENTION)?;
     Ok(Some(backup))
+}
+
+fn config_backup_prefix(path: &Path) -> Option<String> {
+    Some(format!(
+        "{}.ini.backend.",
+        path.file_stem()?.to_string_lossy()
+    ))
+}
+
+fn prune_config_backups(path: &Path, keep: usize) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    let Some(prefix) = config_backup_prefix(path) else {
+        return Ok(());
+    };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return Ok(());
+    };
+
+    let mut backups: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(suffix) = name.strip_prefix(prefix.as_str()) else {
+            continue;
+        };
+        // A snapshot suffix starts with a YYYYMMDD date and may carry a
+        // fractional second after a dot; anything else is not ours to remove.
+        if suffix.len() < 8 || !suffix.as_bytes()[..8].iter().all(u8::is_ascii_digit) {
+            continue;
+        }
+        backups.push(entry.path());
+    }
+    if backups.len() <= keep {
+        return Ok(());
+    }
+
+    backups.sort();
+    for stale in &backups[..backups.len() - keep] {
+        fs::remove_file(stale).with_context(|| {
+            format!(
+                "kan oude config backup niet verwijderen: {}",
+                stale.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn timestamp_suffix() -> String {
@@ -994,6 +1050,36 @@ fn normalize_systems(values: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writing_a_backup_prunes_the_older_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.ini");
+        fs::write(&config, "live").unwrap();
+        for index in 0..15 {
+            fs::write(
+                dir.path()
+                    .join(format!("config.ini.backend.202601010000{index:02}")),
+                "snapshot",
+            )
+            .unwrap();
+        }
+        fs::write(dir.path().join("unrelated.txt"), "keep me").unwrap();
+
+        backup_config_if_exists(&config).unwrap();
+
+        let mut names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with("config.ini.backend."))
+            .collect();
+        names.sort();
+
+        assert_eq!(names.len(), CONFIG_BACKUP_RETENTION);
+        assert!(!names.contains(&"config.ini.backend.20260101000000".to_string()));
+        assert!(dir.path().join("unrelated.txt").exists());
+    }
     use crate::config::AppConfig;
     use crate::sources::load_source_store;
     use std::fs;
