@@ -12,14 +12,17 @@ use crate::backend_config::sync_config_with_backend;
 use crate::config::AppConfig;
 use crate::ports::{PortSaveMatch, discover_port_save_matches};
 use crate::scanner::{
-    RomIndexEntry, SaveAdapterProfile, SaveContainerFormat, allow_write, classify_supported_save,
+    sha256_file, allow_write,
+    RomIndexEntry, SaveAdapterProfile, SaveContainerFormat, classify_supported_save,
     discover_rom_index, discover_save_files, dreamcast_skip_reason,
     encode_download_for_local_container, filename_stem, md5_file, normalize_save_bytes_for_sync,
     normalize_save_for_sync, saturn_skip_reason, sha1_file, sha256_bytes, sidecar_label,
     wii_skip_reason, wii_title_code_from_path,
 };
 use crate::sources::{EmulatorProfile, SourceKind, prepare_sources_for_sync};
-use crate::state::{AuthState, SyncedEntry, load_sync_state, now_rfc3339, save_sync_state};
+use crate::state::{
+    AuthState, SyncedEntry, TerminalRejection, load_sync_state, now_rfc3339, save_sync_state,
+};
 
 #[derive(Debug, Clone)]
 pub struct SyncOptions {
@@ -36,11 +39,28 @@ pub struct SyncOptions {
 pub struct SyncReport {
     pub scanned: usize,
     pub uploaded: usize,
+    pub would_upload: usize,
     pub downloaded: usize,
+    pub would_download: usize,
     pub in_sync: usize,
     pub conflicts: usize,
     pub skipped: usize,
+    /// The server refused an N64 controller-pak upload. Counted apart from
+    /// `skipped`, which also holds saves with nothing to do, and apart from
+    /// `errors`, which holds refusals and failures on every other system.
+    pub rejected_n64_controller_pak: usize,
+    /// The server answered 2xx but returned no save, so nothing was stored.
+    pub accepted_not_stored: usize,
+    /// Saves the server refused permanently. Not re-attempted until the
+    /// payload changes.
+    pub rejected_permanent: usize,
     pub errors: usize,
+    pub dry_run: bool,
+}
+
+/// Marks a summary whose counters describe what would have happened, not what did.
+pub fn dry_run_marker(report: &SyncReport) -> &'static str {
+    if report.dry_run { " (DRY RUN)" } else { "" }
 }
 
 struct ProcessedEntry {
@@ -267,7 +287,10 @@ pub fn run_sync(
     }
     let options = &effective_options;
 
-    let mut report = SyncReport::default();
+    let mut report = SyncReport {
+        dry_run: options.dry_run,
+        ..Default::default()
+    };
     let mut rom_hash_cache: HashMap<String, (String, String)> = HashMap::new();
 
     for source in sources {
@@ -317,9 +340,7 @@ pub fn run_sync(
                     }
                     Err(err) => {
                         report.errors += 1;
-                        if verbose {
-                            eprintln!("Port sync error for {}: {}", port_save.path.display(), err);
-                        }
+                        eprintln!("Port sync error for {}: {}", port_save.path.display(), err);
                     }
                 }
             }
@@ -360,6 +381,21 @@ pub fn run_sync(
                 }
 
                 let save_key = save_path.to_string_lossy().to_string();
+                if let Some(prior) = sync_state.terminal_rejections.get(&save_key)
+                    && sha256_file(&save_path)
+                        .map(|current| current == prior.sha256)
+                        .unwrap_or(false)
+                {
+                    report.rejected_permanent += 1;
+                    eprintln!(
+                        "Not retrying {}: the server refused it with {}{}",
+                        save_path.display(),
+                        prior.status,
+                        if prior.reason.is_empty() { String::new() } else { format!(": {}", prior.reason) }
+                    );
+                    continue;
+                }
+
                 let process_result = process_single_save(
                     &api,
                     &save_path,
@@ -390,8 +426,18 @@ pub fn run_sync(
                     }
                     Err(err) => {
                         report.errors += 1;
-                        if verbose {
-                            eprintln!("Sync error for {}: {}", save_path.display(), err);
+                        eprintln!("Sync error for {}: {}", save_path.display(), err);
+                    if let Some(status) = permanent_rejection_status(&err) {
+                            let sha = sha256_file(&save_path).unwrap_or_default();
+                            sync_state.terminal_rejections.insert(
+                                save_key.clone(),
+                                TerminalRejection {
+                                    sha256: sha,
+                                    status,
+                                    reason: format!("{err:#}"),
+                                    recorded_at: now_rfc3339(),
+                                },
+                            );
                         }
                     }
                 }
@@ -454,9 +500,7 @@ pub fn run_sync(
                 }
                 Err(err) => {
                     report.errors += 1;
-                    if verbose {
-                        eprintln!("Restore error for {}: {}", save_path.display(), err);
-                    }
+                    eprintln!("Restore error for {}: {}", save_path.display(), err);
                 }
             }
         }
@@ -487,6 +531,20 @@ pub fn run_sync(
 
 fn path_is_under_roots(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path.starts_with(root))
+}
+
+/// A 4xx says the request itself was refused, so retrying identical bytes
+/// cannot succeed. 408 and 429 are the exceptions: a timeout or a rate limit
+/// means "later", not "no".
+fn permanent_rejection_status(err: &anyhow::Error) -> Option<u16> {
+    let message = format!("{err:#}").to_ascii_lowercase();
+    let start = message.find("status=")? + "status=".len();
+    let code: u16 = message[start..].split_whitespace().next()?.parse().ok()?;
+    if (400..500).contains(&code) && code != 408 && code != 429 {
+        Some(code)
+    } else {
+        None
+    }
 }
 
 fn source_allows_system(source_systems: &[String], system_slug: &str) -> bool {
@@ -600,10 +658,8 @@ fn restore_cloud_only_saves(
                 Ok(()) => {}
                 Err(err) => {
                     report.errors += 1;
-                    if verbose {
-                        let label = cloud_save.display_name();
-                        eprintln!("Cloud restore error for '{}': {}", label, err);
-                    }
+                    let label = cloud_save.display_name();
+                    eprintln!("Cloud restore error for '{}': {}", label, err);
                 }
             }
         }
@@ -721,7 +777,7 @@ fn restore_single_cloud_save(
     }
 
     if options.dry_run {
-        report.downloaded += 1;
+        report.would_download += 1;
         return Ok(());
     }
 
@@ -1451,7 +1507,7 @@ fn process_port_save(
 
     let upload_port_save = |report: &mut SyncReport| -> Result<Option<ProcessedEntry>> {
         if options.dry_run {
-            report.uploaded += 1;
+            report.would_upload += 1;
             return Ok(Some(processed_entry(
                 state_key.clone(),
                 synced_entry(
@@ -1585,7 +1641,7 @@ fn process_port_save(
         return Ok(None);
     };
     if options.dry_run {
-        report.downloaded += 1;
+        report.would_download += 1;
         return Ok(Some(processed_entry(
             state_key.clone(),
             synced_entry(
@@ -1848,7 +1904,7 @@ fn process_single_save(
 
     if !latest.exists {
         if options.dry_run {
-            report.uploaded += 1;
+            report.would_upload += 1;
             return Ok(Some(processed_entry(
                 state_key.clone(),
                 synced_entry(
@@ -1883,17 +1939,26 @@ fn process_single_save(
             verbose,
         );
         let upload_version = match upload_result {
-            Ok(version) => version,
+            Ok(Some(version)) => Some(version),
+            Ok(None) => {
+                // 2xx with no `save`: the server accepted the request but stored
+                // nothing.  Counting this as uploaded is how a client reports a
+                // hundred successful uploads while the store never grows.
+                report.accepted_not_stored += 1;
+                eprintln!(
+                    "Server accepted {} but returned no save; nothing was stored",
+                    save_path.display()
+                );
+                return Ok(None);
+            }
             Err(err) => {
                 if is_empty_n64_controller_pak_rejection(&err, &system_slug) {
-                    report.skipped += 1;
-                    if verbose {
-                        eprintln!(
-                            "Skipping empty N64 controller pak {}: {}",
-                            save_path.display(),
-                            err
-                        );
-                    }
+                    report.rejected_n64_controller_pak += 1;
+                    eprintln!(
+                        "Rejected empty N64 controller pak {}: {}",
+                        save_path.display(),
+                        err
+                    );
                     return Ok(None);
                 }
                 return Err(err);
@@ -1919,7 +1984,7 @@ fn process_single_save(
 
     if options.force_upload {
         if options.dry_run {
-            report.uploaded += 1;
+            report.would_upload += 1;
             return Ok(Some(processed_entry(
                 state_key.clone(),
                 synced_entry(
@@ -1954,17 +2019,26 @@ fn process_single_save(
             verbose,
         );
         let upload_version = match upload_result {
-            Ok(version) => version,
+            Ok(Some(version)) => Some(version),
+            Ok(None) => {
+                // 2xx with no `save`: the server accepted the request but stored
+                // nothing.  Counting this as uploaded is how a client reports a
+                // hundred successful uploads while the store never grows.
+                report.accepted_not_stored += 1;
+                eprintln!(
+                    "Server accepted {} but returned no save; nothing was stored",
+                    save_path.display()
+                );
+                return Ok(None);
+            }
             Err(err) => {
                 if is_empty_n64_controller_pak_rejection(&err, &system_slug) {
-                    report.skipped += 1;
-                    if verbose {
-                        eprintln!(
-                            "Skipping empty N64 controller pak {}: {}",
-                            save_path.display(),
-                            err
-                        );
-                    }
+                    report.rejected_n64_controller_pak += 1;
+                    eprintln!(
+                        "Rejected empty N64 controller pak {}: {}",
+                        save_path.display(),
+                        err
+                    );
                     return Ok(None);
                 }
                 return Err(err);
@@ -2022,7 +2096,7 @@ fn process_single_save(
                 );
             }
             if options.dry_run {
-                report.uploaded += 1;
+                report.would_upload += 1;
                 return Ok(Some(processed_entry(
                     state_key.clone(),
                     synced_entry(
@@ -2148,7 +2222,7 @@ fn process_single_save(
 
     if let Some(save_id) = latest.id {
         if options.dry_run {
-            report.downloaded += 1;
+            report.would_download += 1;
             let target_save_path = preferred_save_path(
                 save_path,
                 source_kind,
@@ -2427,7 +2501,7 @@ fn process_missing_save(
     let state_key = save_path.to_string_lossy().to_string();
 
     if options.dry_run {
-        report.downloaded += 1;
+        report.would_download += 1;
         return Ok(Some(processed_entry(
             state_key,
             synced_entry(
@@ -3616,6 +3690,30 @@ mod tests {
         assert_eq!(target.emulator_profile.as_deref(), Some("snes9x"));
         assert_eq!(target.system_profile_key.as_deref(), Some("snesProfile"));
         assert_eq!(target.system_profile_value.as_deref(), Some("snes/snes9x"));
+    }
+
+    #[test]
+    fn classifies_permanent_rejections() {
+        let err = anyhow::Error::msg(
+            "HTTP request faalde: status=422 Unprocessable Entity body={\"reason\":\"unsupported\"}",
+        );
+        assert_eq!(permanent_rejection_status(&err), Some(422));
+    }
+
+    #[test]
+    fn rate_limit_and_timeout_are_not_permanent() {
+        for code in [408, 429] {
+            let err = anyhow::Error::msg(format!("status={code} Too Many Requests"));
+            assert_eq!(permanent_rejection_status(&err), None, "{code} must retry");
+        }
+    }
+
+    #[test]
+    fn server_errors_and_transport_failures_are_not_permanent() {
+        let err = anyhow::Error::msg("status=503 Service Unavailable");
+        assert_eq!(permanent_rejection_status(&err), None);
+        let err = anyhow::Error::msg("connection refused");
+        assert_eq!(permanent_rejection_status(&err), None);
     }
 
     #[test]
