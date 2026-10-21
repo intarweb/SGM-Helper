@@ -1247,6 +1247,11 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
             _ => false,
         },
         "nds" => size.is_power_of_two() && (512..=16_777_216).contains(&size),
+        // A title's save data is whatever size that title reserved, so there is
+        // no enumerated table to match against. Without this arm every 3DS save
+        // fell through to `false` and was dropped as unsupported, whatever its
+        // size and whatever the extension set above accepted.
+        "3ds" => (512..=16_777_216).contains(&size),
         "genesis" | "master-system" | "game-gear" | "sega-cd" | "sega-32x" => {
             matches!(
                 size,
@@ -3210,5 +3215,23 @@ mod tests {
                 "/{subdir}/ classified as {got}, expected tgfx16",
             );
         }
+    }
+
+    #[test]
+    fn azahar_title_save_data_classifies_as_3ds() {
+        // The slug arm alone is not enough: the size table has to accept the
+        // payload, and a title's save data is whatever that title reserved.
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp.path().join(
+            "n3ds/azahar/sdmc/Nintendo 3DS/00000000000000000000000000000000/\
+             00000000000000000000000000000000/title/00040000/00111b00/data/00000001/bigegg0.sav",
+        );
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::write(&save, vec![0x11u8; 65536]).unwrap();
+
+        assert_eq!(
+            classify_supported_save(&save, None).map(|value| value.system_slug),
+            Some("3ds".to_string())
+        );
     }
 }
