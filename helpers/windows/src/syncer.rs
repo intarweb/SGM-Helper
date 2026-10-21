@@ -39,6 +39,10 @@ pub struct SyncReport {
     pub in_sync: usize,
     pub conflicts: usize,
     pub skipped: usize,
+    /// The server refused an N64 controller-pak upload. Counted apart from
+    /// `skipped`, which also holds saves with nothing to do, and apart from
+    /// `errors`, which holds refusals and failures on every other system.
+    pub rejected_n64_controller_pak: usize,
     pub errors: usize,
 }
 
@@ -1383,14 +1387,12 @@ fn process_single_save(
             Ok(version) => version,
             Err(err) => {
                 if is_empty_n64_controller_pak_rejection(&err, &system_slug) {
-                    report.skipped += 1;
-                    if verbose {
-                        eprintln!(
-                            "Skipping empty N64 controller pak {}: {}",
-                            save_path.display(),
-                            err
-                        );
-                    }
+                    report.rejected_n64_controller_pak += 1;
+                    eprintln!(
+                        "Rejected empty N64 controller pak {}: {}",
+                        save_path.display(),
+                        err
+                    );
                     return Ok(None);
                 }
                 return Err(err);
@@ -1454,14 +1456,12 @@ fn process_single_save(
             Ok(version) => version,
             Err(err) => {
                 if is_empty_n64_controller_pak_rejection(&err, &system_slug) {
-                    report.skipped += 1;
-                    if verbose {
-                        eprintln!(
-                            "Skipping empty N64 controller pak {}: {}",
-                            save_path.display(),
-                            err
-                        );
-                    }
+                    report.rejected_n64_controller_pak += 1;
+                    eprintln!(
+                        "Rejected empty N64 controller pak {}: {}",
+                        save_path.display(),
+                        err
+                    );
                     return Ok(None);
                 }
                 return Err(err);
