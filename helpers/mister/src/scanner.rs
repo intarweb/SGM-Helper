@@ -637,6 +637,10 @@ pub fn classify_supported_save(
             "desmume",
             "ryujinx",
             "citra",
+            "n3ds",
+            "/3ds/",
+            "\\3ds\\",
+            "azahar",
             "yuzu",
             "suyu",
             "dolphin",
@@ -939,6 +943,12 @@ fn infer_nintendo_slug(haystack: &str) -> Option<&'static str> {
     ) {
         return Some("nes");
     }
+    if contains_any(
+        haystack,
+        &["n3ds", "/3ds/", "\\3ds\\", "azahar", "citra"],
+    ) {
+        return Some("3ds");
+    }
     None
 }
 
@@ -1109,6 +1119,9 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
         "gba" => matches!(ext, "sav" | "srm" | "sa1"),
         "n64" => matches!(ext, "eep" | "fla" | "sra" | "mpk" | "cpk" | "srm"),
         "nds" => matches!(ext, "sav" | "dsv"),
+        // Azahar/Citra store per-title save data under nand/ and sdmc/; the
+        // extension set is unverified against a device listing.
+        "3ds" => matches!(ext, "sav" | "dsv" | "dat" | "bin"),
         "genesis" => matches!(ext, "sav" | "srm" | "ram"),
         "master-system" | "game-gear" | "sega-cd" | "sega-32x" => {
             matches!(ext, "sav" | "srm" | "ram")
@@ -2227,6 +2240,39 @@ fn looks_plain_text(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::infer_nintendo_slug;
+
+    #[test]
+    fn core_directory_names_resolve_to_their_system() {
+        // The directory list admits core names, so the classifier has to know them
+        // too, or a path the vocabulary misses is left unclassified.
+        // The caller lowercases the path before classifying.
+        assert_eq!(infer_nintendo_slug("/saves/snes9x"), Some("snes"));
+        assert_eq!(infer_nintendo_slug("/saves/bsnes"), Some("snes"));
+        assert_eq!(infer_nintendo_slug("/saves/fceumm"), Some("nes"));
+        assert_eq!(infer_nintendo_slug("/saves/mgba"), Some("gba"));
+        assert_eq!(infer_nintendo_slug("/saves/desmume"), Some("nds"));
+        assert_eq!(
+            infer_nintendo_slug("/saves/mupen64plus-next opengl"),
+            Some("n64")
+        );
+        assert_eq!(infer_nintendo_slug("/saves/gb/pokemon.sav"), Some("gameboy"));
+    }
+
+    #[test]
+    fn azahar_and_n3ds_paths_resolve_to_the_3ds_slug() {
+        assert_eq!(
+            infer_nintendo_slug("/saves/n3ds/azahar/nand/title/00040000"),
+            Some("3ds")
+        );
+        assert_eq!(
+            infer_nintendo_slug("/saves/n3ds/azahar/sdmc/Nintendo 3DS"),
+            Some("3ds")
+        );
+        assert_eq!(infer_nintendo_slug("/saves/3ds/citra"), Some("3ds"));
+        assert_eq!(infer_nintendo_slug("/saves/gb/pokemon.sav"), Some("gameboy"));
+    }
+
     use super::*;
     use std::fs;
     use std::io::Write;
