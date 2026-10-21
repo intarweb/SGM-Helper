@@ -35,7 +35,9 @@ pub struct SyncOptions {
 pub struct SyncReport {
     pub scanned: usize,
     pub uploaded: usize,
+    pub would_upload: usize,
     pub downloaded: usize,
+    pub would_download: usize,
     pub in_sync: usize,
     pub conflicts: usize,
     pub skipped: usize,
@@ -549,7 +551,7 @@ fn restore_single_cloud_save(
     }
 
     if options.dry_run {
-        report.downloaded += 1;
+        report.would_download += 1;
         return Ok(());
     }
 
@@ -1354,7 +1356,7 @@ fn process_single_save(
 
     if !latest.exists {
         if options.dry_run {
-            report.uploaded += 1;
+            report.would_upload += 1;
             return Ok(Some(processed_entry(
                 state_key.clone(),
                 synced_entry(
@@ -1434,7 +1436,7 @@ fn process_single_save(
 
     if options.force_upload {
         if options.dry_run {
-            report.uploaded += 1;
+            report.would_upload += 1;
             return Ok(Some(processed_entry(
                 state_key.clone(),
                 synced_entry(
@@ -1546,7 +1548,7 @@ fn process_single_save(
                 );
             }
             if options.dry_run {
-                report.uploaded += 1;
+                report.would_upload += 1;
                 return Ok(Some(processed_entry(
                     state_key.clone(),
                     synced_entry(
@@ -1670,7 +1672,7 @@ fn process_single_save(
 
     if let Some(save_id) = latest.id {
         if options.dry_run {
-            report.downloaded += 1;
+            report.would_download += 1;
             let target_save_path = preferred_save_path(
                 save_path,
                 source_kind,
@@ -1924,7 +1926,7 @@ fn process_missing_save(
     let state_key = save_path.to_string_lossy().to_string();
 
     if options.dry_run {
-        report.downloaded += 1;
+        report.would_download += 1;
         return Ok(Some(processed_entry(
             state_key,
             synced_entry(

@@ -213,6 +213,9 @@ fn backend_forced_dry_run_marks_the_summary_and_uploads_nothing() {
         vec![0x00u8; 32768],
     )
     .unwrap();
+    // A save the classifier cannot place: skipped before any write is decided.
+    fs::create_dir_all(root.join("misc")).unwrap();
+    fs::write(root.join("misc/unknown.sav"), vec![0x00u8; 32768]).unwrap();
     let config = write_config(&tmp, &server, &root, &state_dir);
 
     Command::cargo_bin("sgm-windows-helper")
@@ -242,8 +245,15 @@ fn backend_forced_dry_run_marks_the_summary_and_uploads_nothing() {
         "summary line carries no dry-run marker: {stdout}"
     );
     assert!(
-        stdout.contains("uploaded=1"),
-        "dry run did not count the upload it skipped: {stdout}"
+        stdout.contains("uploaded=0 downloaded=0"),
+        "dry run counted a simulation as work done: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "skipped=1 rejected_n64_controller_pak=0 accepted_not_stored=0 \
+             errors=0 would_upload=1 would_download=0"
+        ),
+        "a skipped save was counted as a simulated upload, or the simulation was missed: {stdout}"
     );
     assert_eq!(upload.calls(), 0);
 }
