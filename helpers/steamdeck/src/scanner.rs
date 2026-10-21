@@ -584,9 +584,16 @@ pub fn classify_supported_save(
     let save_lower = save_path.to_string_lossy().to_ascii_lowercase();
     if contains_any(
         &save_lower,
-        &["gameboy advance", "game boy advance", "/gba/", "\\gba\\"],
-    ) {
-        if is_plausible_save_for_system(&save_ext, save_size, "gba") {
+        &[
+            "gameboy advance",
+            "game boy advance",
+            "mgba",
+            "visualboyadvance",
+            "vba",
+            "/gba/",
+            "\\gba\\",
+        ],
+    ) {        if is_plausible_save_for_system(&save_ext, save_size, "gba") {
             return classify_if_valid(
                 save_path,
                 &save_ext,
@@ -895,6 +902,7 @@ fn infer_nintendo_slug(haystack: &str) -> Option<&'static str> {
         &[
             "gameboy advance",
             "game boy advance",
+            "mgba",
             "visualboyadvance",
             "vba",
             "/gba/",
@@ -909,19 +917,30 @@ fn infer_nintendo_slug(haystack: &str) -> Option<&'static str> {
     ) {
         return Some("gameboy");
     }
-    if contains_any(haystack, &["nintendo ds", "/nds/", "\\nds\\"]) {
+    if contains_any(
+        haystack,
+        &["nintendo ds", "/nds/", "\\nds\\", "melonds", "desmume"],
+    ) {
         return Some("nds");
     }
-    if contains_any(haystack, &["nintendo 64", "/n64/", "\\n64\\"]) {
+    if contains_any(
+        haystack,
+        &["nintendo 64", "/n64/", "\\n64\\", "mupen", "project64"],
+    ) {
         return Some("n64");
     }
     if contains_any(
         haystack,
-        &["super nintendo", "/snes/", "\\snes\\", "/sfc/", "\\sfc\\"],
+        &[
+            "super nintendo", "/snes/", "\\snes\\", "/sfc/", "\\sfc\\", "snes9x", "bsnes",
+        ],
     ) {
         return Some("snes");
     }
-    if contains_any(haystack, &["famicom", "/nes/", "\\nes\\"]) {
+    if contains_any(
+        haystack,
+        &["famicom", "/nes/", "\\nes\\", "fceux", "fceumm", "nestopia"],
+    ) {
         return Some("nes");
     }
     if contains_any(
