@@ -41,7 +41,7 @@ use crate::state::{
     AuthState, clear_auth_state_for_base_url, load_auth_state, load_auth_state_for_base_url,
     load_sync_state, save_auth_state_for_base_url,
 };
-use crate::syncer::{SyncOptions, run_sync};
+use crate::syncer::{SyncOptions, dry_run_marker, run_sync};
 use crate::watcher::{WatchOptions, run_watch};
 
 pub fn run() -> Result<()> {

@@ -10,7 +10,7 @@ use crate::api::ApiClient;
 use crate::config::AppConfig;
 use crate::sources::SourceKind;
 use crate::state::AuthState;
-use crate::syncer::{SyncOptions, run_sync};
+use crate::syncer::{SyncOptions, dry_run_marker, run_sync};
 
 #[derive(Debug, Clone)]
 pub struct WatchOptions {
@@ -86,6 +86,7 @@ pub fn run_watch(
             println!(
                 "Watch cycle {} complete: scanned={} uploaded={} downloaded={} in_sync={} conflicts={} skipped={} rejected_n64_controller_pak={} accepted_not_stored={} errors={}",
                 cycles,
+                dry_run_marker(&report),
                 report.scanned,
                 report.uploaded,
                 report.downloaded,

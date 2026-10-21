@@ -47,6 +47,12 @@ pub struct SyncReport {
     /// The server answered 2xx but returned no save, so nothing was stored.
     pub accepted_not_stored: usize,
     pub errors: usize,
+    pub dry_run: bool,
+}
+
+/// Marks a summary whose counters describe what would have happened, not what did.
+pub fn dry_run_marker(report: &SyncReport) -> &'static str {
+    if report.dry_run { " (DRY RUN)" } else { "" }
 }
 
 struct ProcessedEntry {
@@ -146,7 +152,10 @@ pub fn run_sync(
     }
     let options = &effective_options;
 
-    let mut report = SyncReport::default();
+    let mut report = SyncReport {
+        dry_run: options.dry_run,
+        ..Default::default()
+    };
     let mut rom_hash_cache: HashMap<String, (String, String)> = HashMap::new();
 
     for source in sources {

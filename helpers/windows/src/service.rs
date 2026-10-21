@@ -17,7 +17,7 @@ use crate::api::ApiClient;
 use crate::config::AppConfig;
 use crate::sources::{SourceKind, load_source_store, resolved_sources_or_default};
 use crate::state::{AuthState, now_rfc3339};
-use crate::syncer::{SyncOptions, SyncReport, run_sync};
+use crate::syncer::{SyncOptions, SyncReport, dry_run_marker, run_sync};
 
 #[derive(Debug, Clone)]
 pub struct ServiceRunOptions {
