@@ -40,6 +40,8 @@ pub struct SyncReport {
     pub in_sync: usize,
     pub conflicts: usize,
     pub skipped: usize,
+    /// The server answered 2xx but returned no save, so nothing was stored.
+    pub accepted_not_stored: usize,
     pub errors: usize,
 }
 
@@ -1724,7 +1726,18 @@ fn process_single_save(
             verbose,
         );
         let upload_version = match upload_result {
-            Ok(version) => version,
+            Ok(Some(version)) => Some(version),
+            Ok(None) => {
+                // 2xx with no `save`: the server accepted the request but stored
+                // nothing.  Counting this as uploaded is how a client reports a
+                // hundred successful uploads while the store never grows.
+                report.accepted_not_stored += 1;
+                eprintln!(
+                    "Server accepted {} but returned no save; nothing was stored",
+                    save_path.display()
+                );
+                return Ok(None);
+            }
             Err(err) => {
                 if is_empty_n64_controller_pak_rejection(&err, &system_slug) {
                     report.skipped += 1;
@@ -1795,7 +1808,18 @@ fn process_single_save(
             verbose,
         );
         let upload_version = match upload_result {
-            Ok(version) => version,
+            Ok(Some(version)) => Some(version),
+            Ok(None) => {
+                // 2xx with no `save`: the server accepted the request but stored
+                // nothing.  Counting this as uploaded is how a client reports a
+                // hundred successful uploads while the store never grows.
+                report.accepted_not_stored += 1;
+                eprintln!(
+                    "Server accepted {} but returned no save; nothing was stored",
+                    save_path.display()
+                );
+                return Ok(None);
+            }
             Err(err) => {
                 if is_empty_n64_controller_pak_rejection(&err, &system_slug) {
                     report.skipped += 1;

@@ -242,13 +242,14 @@ fn dispatch(cli: Cli, loaded: LoadedConfig) -> Result<()> {
 
             if !cli.quiet {
                 println!(
-                    "Sync complete: scanned={} uploaded={} downloaded={} in_sync={} conflicts={} skipped={} errors={}",
+                    "Sync complete: scanned={} uploaded={} downloaded={} in_sync={} conflicts={} skipped={} accepted_not_stored={} errors={}",
                     report.scanned,
                     report.uploaded,
                     report.downloaded,
                     report.in_sync,
                     report.conflicts,
                     report.skipped,
+                    report.accepted_not_stored,
                     report.errors
                 );
             }

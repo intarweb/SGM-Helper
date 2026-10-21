@@ -84,7 +84,7 @@ pub fn run_watch(
         cycles += 1;
         if !quiet {
             println!(
-                "Watch cycle {} complete: scanned={} uploaded={} downloaded={} in_sync={} conflicts={} skipped={} errors={}",
+                "Watch cycle {} complete: scanned={} uploaded={} downloaded={} in_sync={} conflicts={} skipped={} accepted_not_stored={} errors={}",
                 cycles,
                 report.scanned,
                 report.uploaded,
@@ -92,6 +92,7 @@ pub fn run_watch(
                 report.in_sync,
                 report.conflicts,
                 report.skipped,
+                report.accepted_not_stored,
                 report.errors
             );
         }
