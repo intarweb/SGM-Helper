@@ -582,7 +582,7 @@ pub fn classify_supported_save(
     }
 
     let save_lower = save_path.to_string_lossy().to_ascii_lowercase();
-    if contains_any(&save_lower, &["gameboy advance", "/gba/", "\\gba\\"]) {
+    if contains_any(&save_lower, &["gameboy advance", "/gba/", "\\gba\\", "mgba", "visualboyadvance", "vba"]) {
         if is_plausible_save_for_system(&save_ext, save_size, "gba") {
             return classify_if_valid(
                 save_path,
@@ -879,22 +879,30 @@ fn infer_nintendo_slug(haystack: &str) -> &'static str {
     ) {
         return "wii";
     }
-    if contains_any(haystack, &["gameboy advance", "/gba/", "\\gba\\"]) {
+    if contains_any(
+        haystack,
+        &["gameboy advance", "/gba/", "\\gba\\", "mgba", "visualboyadvance", "vba"],
+    ) {
         return "gba";
     }
-    if contains_any(haystack, &["nintendo ds", "/nds/", "\\nds\\"]) {
+    if contains_any(haystack, &["nintendo ds", "/nds/", "\\nds\\", "melonds", "desmume"]) {
         return "nds";
     }
-    if contains_any(haystack, &["nintendo 64", "/n64/", "\\n64\\"]) {
+    if contains_any(haystack, &["nintendo 64", "/n64/", "\\n64\\", "mupen", "project64"]) {
         return "n64";
     }
     if contains_any(
         haystack,
-        &["super nintendo", "/snes/", "\\snes\\", "/sfc/", "\\sfc\\"],
+        &[
+            "super nintendo", "/snes/", "\\snes\\", "/sfc/", "\\sfc\\", "snes9x", "bsnes",
+        ],
     ) {
         return "snes";
     }
-    if contains_any(haystack, &["famicom", "/nes/", "\\nes\\"]) {
+    if contains_any(
+        haystack,
+        &["famicom", "/nes/", "\\nes\\", "fceux", "fceumm", "nestopia"],
+    ) {
         return "nes";
     }
     "gameboy"
