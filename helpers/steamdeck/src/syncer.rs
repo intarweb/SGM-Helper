@@ -14,9 +14,9 @@ use crate::ports::{PortSaveMatch, discover_port_save_matches};
 use crate::scanner::{
     RomIndexEntry, SaveAdapterProfile, SaveContainerFormat, allow_write, classify_supported_save,
     discover_rom_index, discover_save_files, dreamcast_skip_reason,
-    encode_download_for_local_container, filename_stem, md5_file, normalize_save_bytes_for_sync,
-    normalize_save_for_sync, saturn_skip_reason, sha1_file, sha256_bytes, sha256_file,
-    sidecar_label, wii_skip_reason, wii_title_code_from_path,
+    encode_download_for_local_container, filename_stem, md5_file, n64_controller_pak_entry_count,
+    normalize_save_bytes_for_sync, normalize_save_for_sync, saturn_skip_reason, sha1_file,
+    sha256_bytes, sha256_file, sidecar_label, wii_skip_reason, wii_title_code_from_path,
 };
 use crate::sources::{EmulatorProfile, SourceKind, prepare_sources_for_sync};
 use crate::state::{
@@ -1766,6 +1766,18 @@ fn process_single_save(
             return Ok(None);
         }
     };
+    // The server refuses a controller pak that holds no notes.  Catching it
+    // here keeps the four blank templates a MiSTer writes from being uploaded
+    // on every pass, where they arrived as a rejection each and buried every
+    // other error in the server log.
+    if is_empty_n64_controller_pak(save_path, &normalized_save.canonical_bytes, &system_slug) {
+        report.rejected_n64_controller_pak += 1;
+        eprintln!(
+            "Skipping empty N64 controller pak {}: no save entries",
+            save_path.display()
+        );
+        return Ok(None);
+    }
     let local_sha = sha256_bytes(&normalized_save.canonical_bytes);
     if verbose {
         eprintln!(
@@ -3245,6 +3257,19 @@ fn is_missing_cloud_payload_reference(err: &anyhow::Error) -> bool {
     let missing_hint =
         message.contains("no such file or directory") || message.contains("missing on server");
     payload_hint && missing_hint
+}
+
+fn is_empty_n64_controller_pak(save_path: &Path, bytes: &[u8], system_slug: &str) -> bool {
+    if system_slug != "n64" {
+        return false;
+    }
+    let Some(extension) = save_path.extension().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    if !extension.eq_ignore_ascii_case("cpk") && !extension.eq_ignore_ascii_case("mpk") {
+        return false;
+    }
+    n64_controller_pak_entry_count(bytes) == Some(0)
 }
 
 fn is_empty_n64_controller_pak_rejection(err: &anyhow::Error, system_slug: &str) -> bool {

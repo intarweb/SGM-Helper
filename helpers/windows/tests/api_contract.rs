@@ -643,3 +643,189 @@ fn sync_auto_enrolls_when_gate_is_open_without_login() {
     let auth: Value = serde_json::from_str(&fs::read_to_string(auth_path).unwrap()).unwrap();
     assert_eq!(auth["token"], "RSM-AAAA-BBBB");
 }
+
+fn controller_pak_with_start_pages(start_pages: &[u16]) -> Vec<u8> {
+    // A 32 KiB controller pak with a valid ID sector. Each start page marks a
+    // note the pak directory holds; an empty list is a pak that has never been
+    // written, which is what a MiSTer leaves behind for every game.
+    let bank_count = 1u8;
+    let mut pak = vec![0u8; 32 * 1024];
+    let notes_offset = (1 + 2 * usize::from(bank_count)) * 256;
+    for (index, start_page) in start_pages.iter().enumerate() {
+        let base = notes_offset + index * 32;
+        pak[base + 6..base + 8].copy_from_slice(&start_page.to_be_bytes());
+        pak[base + 16..base + 26].copy_from_slice(b"WIPEOUT 64");
+    }
+    for base in [0x0020usize, 0x0060, 0x0080, 0x00c0] {
+        let sector = &mut pak[base..base + 32];
+        sector[26] = bank_count;
+        let sum = sector[..28].chunks_exact(2).fold(0u16, |acc, pair| {
+            acc.wrapping_add(u16::from_be_bytes([pair[0], pair[1]]))
+        });
+        sector[28..30].copy_from_slice(&sum.to_be_bytes());
+        sector[30..32].copy_from_slice(&0xfff2u16.wrapping_sub(sum).to_be_bytes());
+    }
+    pak
+}
+
+#[test]
+fn sync_skips_an_empty_controller_pak_without_uploading() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_n64","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"n64@example.com"}}"#);
+    });
+    let rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"n64sha","md5":"n64md5"}}"#);
+    });
+    let save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-n64","sha256":"sha-up"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Nintendo/N64")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("Nintendo/N64/Wipeout 64_1.cpk"),
+        controller_pak_with_start_pages(&[]),
+    )
+    .unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("n64@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "sync failed: {stdout}");
+    assert_eq!(
+        upload.calls(),
+        0,
+        "an empty controller pak was uploaded, so the server will refuse it again: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "scanned=1 uploaded=0 downloaded=0 in_sync=0 conflicts=0 skipped=0 \
+             rejected_n64_controller_pak=1"
+        ),
+        "the refusal was not counted as an empty controller pak: {stdout}"
+    );
+    let _ = (rom_lookup, save_latest);
+}
+
+#[test]
+fn sync_uploads_a_controller_pak_that_holds_a_note() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_n64","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"n64@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"n64sha","md5":"n64md5"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-n64","sha256":"sha-up"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Nintendo/N64")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("Nintendo/N64/Wipeout 64.cpk"),
+        controller_pak_with_start_pages(&[5]),
+    )
+    .unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("n64@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "sync failed: {stdout}");
+    assert_eq!(
+        upload.calls(),
+        1,
+        "a controller pak holding a note was not uploaded: {stdout}"
+    );
+    assert!(
+        !stdout.contains("rejected_n64_controller_pak=1"),
+        "a pak with a note in it was counted as empty: {stdout}"
+    );
+}
