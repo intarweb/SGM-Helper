@@ -1247,6 +1247,11 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
             _ => false,
         },
         "nds" => size.is_power_of_two() && (512..=16_777_216).contains(&size),
+        // A title's save data is whatever size that title reserved, so there is
+        // no enumerated table to match against. Without this arm every 3DS save
+        // fell through to `false` and was dropped as unsupported, whatever its
+        // size and whatever the extension set above accepted.
+        "3ds" => (512..=16_777_216).contains(&size),
         "genesis" | "master-system" | "game-gear" | "sega-cd" | "sega-32x" => {
             matches!(
                 size,
@@ -1501,13 +1506,15 @@ pub(crate) fn n64_controller_pak_entry_count(bytes: &[u8]) -> Option<usize> {
     let notes = bytes.get(notes_offset..notes_end)?;
     Some(
         notes
-            .chunks_exact(N64_PAK_NOTE_SIZE)
+            .as_chunks::<N64_PAK_NOTE_SIZE>()
+            .0
+            .iter()
             .filter(|note| {
                 let start_page = u16::from_be_bytes([
                     note[N64_PAK_NOTE_START_PAGE],
                     note[N64_PAK_NOTE_START_PAGE + 1],
                 ]);
-                start_page != 0 && !n64_controller_pak_note_name_is_blank(note)
+                start_page != 0 && !n64_controller_pak_note_name_is_blank(&note[..])
             })
             .count(),
     )
@@ -1520,9 +1527,13 @@ fn n64_controller_pak_bank_count(bytes: &[u8]) -> Option<u8> {
         };
         let checksum = u16::from_be_bytes([sector[28], sector[29]]);
         let checksum_inverse = u16::from_be_bytes([sector[30], sector[31]]);
-        let sum = sector[..28].chunks_exact(2).fold(0u16, |acc, pair| {
-            acc.wrapping_add(u16::from_be_bytes([pair[0], pair[1]]))
-        });
+        let sum = sector[..28]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .fold(0u16, |acc, pair| {
+                acc.wrapping_add(u16::from_be_bytes(*pair))
+            });
         if sum == checksum && checksum_inverse == 0xfff2u16.wrapping_sub(sum) {
             return Some(sector[26]);
         }
@@ -3291,9 +3302,13 @@ mod tests {
         for base in N64_PAK_ID_OFFSETS {
             let sector = &mut pak[base..base + N64_PAK_ID_SIZE];
             sector[26] = bank_count;
-            let sum = sector[..28].chunks_exact(2).fold(0u16, |acc, pair| {
-                acc.wrapping_add(u16::from_be_bytes([pair[0], pair[1]]))
-            });
+            let sum = sector[..28]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .fold(0u16, |acc, pair| {
+                    acc.wrapping_add(u16::from_be_bytes(*pair))
+                });
             sector[28..30].copy_from_slice(&sum.to_be_bytes());
             sector[30..32].copy_from_slice(&0xfff2u16.wrapping_sub(sum).to_be_bytes());
         }
@@ -3339,5 +3354,23 @@ mod tests {
         // directory walk skips it, and so must the count.
         let pak = controller_pak(&[(0, *b"FREED SLOT      ")]);
         assert_eq!(n64_controller_pak_entry_count(&pak), Some(0));
+    }
+
+    #[test]
+    fn azahar_title_save_data_classifies_as_3ds() {
+        // The slug arm alone is not enough: the size table has to accept the
+        // payload, and a title's save data is whatever that title reserved.
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp.path().join(
+            "n3ds/azahar/sdmc/Nintendo 3DS/00000000000000000000000000000000/\
+             00000000000000000000000000000000/title/00040000/00111b00/data/00000001/bigegg0.sav",
+        );
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::write(&save, vec![0x11u8; 65536]).unwrap();
+
+        assert_eq!(
+            classify_supported_save(&save, None).map(|value| value.system_slug),
+            Some("3ds".to_string())
+        );
     }
 }

@@ -963,9 +963,13 @@ fn controller_pak_with_start_pages(start_pages: &[u16]) -> Vec<u8> {
     for base in [0x0020usize, 0x0060, 0x0080, 0x00c0] {
         let sector = &mut pak[base..base + 32];
         sector[26] = bank_count;
-        let sum = sector[..28].chunks_exact(2).fold(0u16, |acc, pair| {
-            acc.wrapping_add(u16::from_be_bytes([pair[0], pair[1]]))
-        });
+        let sum = sector[..28]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .fold(0u16, |acc, pair| {
+                acc.wrapping_add(u16::from_be_bytes(*pair))
+            });
         sector[28..30].copy_from_slice(&sum.to_be_bytes());
         sector[30..32].copy_from_slice(&0xfff2u16.wrapping_sub(sum).to_be_bytes());
     }
