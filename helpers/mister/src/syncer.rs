@@ -714,7 +714,7 @@ fn restore_single_cloud_save(
         report.skipped += 1;
         if verbose {
             eprintln!(
-                "Skipping cloud {} save '{}': system is disabled for source '{}'",
+                "Skipping cloud {} save '{}': {} is not in this source's SYSTEMS list",
                 system_slug,
                 cloud_save.display_name(),
                 source_name
@@ -1425,7 +1425,7 @@ fn process_single_save(
         report.skipped += 1;
         if verbose {
             eprintln!(
-                "Skipping {}: system {} is disabled for source '{}'",
+                "Skipping {}: {} is not in this source's SYSTEMS list ('{}')",
                 save_path.display(),
                 system_slug,
                 source_name
@@ -2089,7 +2089,7 @@ fn process_missing_save(
         report.skipped += 1;
         if verbose {
             eprintln!(
-                "Skipping missing {} save restore for {}: system is disabled for source '{}'",
+                "Skipping missing {} save restore for {}: not in this source's SYSTEMS list ('{}')",
                 system_slug,
                 save_path.display(),
                 source_name
@@ -4071,5 +4071,24 @@ mod tests {
             r#"HTTP request faalde: status=503 Service Unavailable body={{"reason":"down"}}"#
         );
         assert_eq!(permanent_rejection_status(&err), None);
+    }
+
+    #[test]
+    fn a_source_admits_only_the_systems_it_lists() {
+        // The gate that dropped 60 classified MAME files: the source's own
+        // SYSTEMS list. It compares the canonical slug, so the config and the
+        // classifier have to agree on the name.
+        let systems = vec!["snes".to_string(), "genesis".to_string()];
+        assert!(source_allows_system(&systems, "snes"));
+        assert!(source_allows_system(&systems, "SNES"));
+        assert!(!source_allows_system(&systems, "arcade"));
+        assert!(!source_allows_system(&systems, ""));
+    }
+
+    #[test]
+    fn a_source_listing_a_wildcard_admits_every_system() {
+        let systems = vec!["*".to_string()];
+        assert!(source_allows_system(&systems, "arcade"));
+        assert!(source_allows_system(&systems, "anything-at-all"));
     }
 }
