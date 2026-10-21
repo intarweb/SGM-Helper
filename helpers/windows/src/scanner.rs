@@ -1122,7 +1122,10 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
             "sav" | "srm" | "ram" | "mcr" | "mc" | "mcd" | "vmp" | "psv" | "gme"
         ),
         "ps2" => matches!(ext, "ps2" | "bin"),
-        "psp" | "psvita" | "ps3" | "ps4" | "ps5" => matches!(ext, "sav" | "srm" | "ram"),
+        // PPSSPP keeps each game's save in a SAVEDATA/<GAMECODE>/ directory and
+        // the payload is a .bin inside it, which is the file the helper syncs.
+        "psp" => matches!(ext, "sav" | "srm" | "ram" | "bin"),
+        "psvita" | "ps3" | "ps4" | "ps5" => matches!(ext, "sav" | "srm" | "ram"),
         _ => false,
     };
     if !extension_ok {
@@ -2229,15 +2232,15 @@ mod tests {
     #[test]
     fn core_directory_names_resolve_to_their_system() {
         // The directory list admits core names, so the classifier has to know them
-        // too, or everything unmatched falls through to the "gameboy" fallback.
+        // too, or a path the vocabulary misses is left unclassified.
         // The caller lowercases the path before classifying.
-        assert_eq!(infer_nintendo_slug("/saves/snes9x"), "snes");
-        assert_eq!(infer_nintendo_slug("/saves/bsnes"), "snes");
-        assert_eq!(infer_nintendo_slug("/saves/fceumm"), "nes");
-        assert_eq!(infer_nintendo_slug("/saves/mgba"), "gba");
-        assert_eq!(infer_nintendo_slug("/saves/desmume"), "nds");
-        assert_eq!(infer_nintendo_slug("/saves/mupen64plus-next opengl"), "n64");
-        assert_eq!(infer_nintendo_slug("/saves/gb"), "gameboy");
+        assert_eq!(infer_nintendo_slug("/saves/snes9x"), Some("snes"));
+        assert_eq!(infer_nintendo_slug("/saves/bsnes"), Some("snes"));
+        assert_eq!(infer_nintendo_slug("/saves/fceumm"), Some("nes"));
+        assert_eq!(infer_nintendo_slug("/saves/mgba"), Some("gba"));
+        assert_eq!(infer_nintendo_slug("/saves/desmume"), Some("nds"));
+        assert_eq!(infer_nintendo_slug("/saves/mupen64plus-next opengl"), Some("n64"));
+        assert_eq!(infer_nintendo_slug("/saves/gb/pokemon.sav"), Some("gameboy"));
     }
     use super::*;
     use std::fs;
@@ -2546,6 +2549,23 @@ mod tests {
                 "{hint}"
             );
         }
+    }
+
+    #[test]
+    fn ppsspp_savedata_bin_classifies_as_psp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp
+            .path()
+            .join("ppsspp_win/memstick/PSP/SAVEDATA/ULUS10437GameData00/DISSIDIA.BIN");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        let mut payload = vec![0x00u8; 500_000];
+        payload[0] = 0xFF;
+        fs::write(&save, &payload).unwrap();
+
+        assert_eq!(
+            infer_supported_console_slug(&save, None).as_deref(),
+            Some("psp")
+        );
     }
 
     #[test]

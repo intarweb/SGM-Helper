@@ -1135,7 +1135,10 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
             "sav" | "srm" | "ram" | "mcr" | "mc" | "mcd" | "vmp" | "psv" | "gme"
         ),
         "ps2" => matches!(ext, "ps2" | "bin"),
-        "psp" | "psvita" | "ps3" | "ps4" | "ps5" => matches!(ext, "sav" | "srm" | "ram"),
+        // PPSSPP keeps each game's save in a SAVEDATA/<GAMECODE>/ directory and
+        // the payload is a .bin inside it, which is the file the helper syncs.
+        "psp" => matches!(ext, "sav" | "srm" | "ram" | "bin"),
+        "psvita" | "ps3" | "ps4" | "ps5" => matches!(ext, "sav" | "srm" | "ram"),
         _ => false,
     };
     if !extension_ok {
@@ -2243,10 +2246,10 @@ mod tests {
     fn azahar_and_n3ds_paths_resolve_to_the_3ds_slug() {
         // Without this arm every unmatched Nintendo path falls through to
         // "gameboy", so a 3DS save could be classified as the wrong system.
-        assert_eq!(infer_nintendo_slug("/saves/n3ds/azahar/nand/title/00040000"), "3ds");
-        assert_eq!(infer_nintendo_slug("/saves/n3ds/azahar/sdmc/Nintendo 3DS"), "3ds");
-        assert_eq!(infer_nintendo_slug("/saves/3ds/citra"), "3ds");
-        assert_eq!(infer_nintendo_slug("/saves/gb/gameboy"), "gameboy");
+        assert_eq!(infer_nintendo_slug("/saves/n3ds/azahar/nand/title/00040000"), Some("3ds"));
+        assert_eq!(infer_nintendo_slug("/saves/n3ds/azahar/sdmc/Nintendo 3DS"), Some("3ds"));
+        assert_eq!(infer_nintendo_slug("/saves/3ds/citra"), Some("3ds"));
+        assert_eq!(infer_nintendo_slug("/saves/gb/gameboy"), Some("gameboy"));
     }
     use super::*;
     use std::fs;
@@ -2555,6 +2558,23 @@ mod tests {
                 "{hint}"
             );
         }
+    }
+
+    #[test]
+    fn ppsspp_savedata_bin_classifies_as_psp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp
+            .path()
+            .join("ppsspp_win/memstick/PSP/SAVEDATA/ULUS10437GameData00/DISSIDIA.BIN");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        let mut payload = vec![0x00u8; 500_000];
+        payload[0] = 0xFF;
+        fs::write(&save, &payload).unwrap();
+
+        assert_eq!(
+            infer_supported_console_slug(&save, None).as_deref(),
+            Some("psp")
+        );
     }
 
     #[test]
