@@ -246,7 +246,7 @@ fn dispatch(cli: Cli, loaded: LoadedConfig) -> Result<()> {
 
             if !cli.quiet {
                 println!(
-                    "Sync complete: scanned={} uploaded={} downloaded={} in_sync={} conflicts={} skipped={} rejected_n64_controller_pak={} errors={}  \
+                    "Sync complete: scanned={} uploaded={} downloaded={} in_sync={} conflicts={} skipped={} rejected_n64_controller_pak={} accepted_not_stored={} errors={}  \
                      (scanned = local saves found once; skipped = per-pass decisions across upload and restore, so it can exceed scanned)",
                     report.scanned,
                     report.uploaded,
@@ -255,7 +255,7 @@ fn dispatch(cli: Cli, loaded: LoadedConfig) -> Result<()> {
                     report.conflicts,
                     report.skipped,
                     report.rejected_n64_controller_pak,
-                    report.errors
+                    report.accepted_not_stored,                    report.errors
                 );
             }
         }
