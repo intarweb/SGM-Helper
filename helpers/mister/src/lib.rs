@@ -261,7 +261,8 @@ fn dispatch(cli: Cli, loaded: LoadedConfig) -> Result<()> {
                     report.rejected_permanent,
                     report.errors,
                     report.would_upload,
-                    report.would_download                );
+                    report.would_download
+                );
             }
         }
         Commands::Convert {

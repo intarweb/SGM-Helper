@@ -11,12 +11,11 @@ use crate::api::{
 use crate::backend_config::sync_config_with_backend;
 use crate::config::AppConfig;
 use crate::scanner::{
-    sha256_file,
     RomIndexEntry, SaveAdapterProfile, SaveContainerFormat, classify_supported_save,
     discover_rom_index, discover_save_files, dreamcast_skip_reason,
     encode_download_for_local_container, filename_stem, md5_file, normalize_save_bytes_for_sync,
-    normalize_save_for_sync, saturn_skip_reason, sha1_file, sha256_bytes, wii_skip_reason,
-    wii_title_code_from_path,
+    normalize_save_for_sync, saturn_skip_reason, sha1_file, sha256_bytes, sha256_file,
+    wii_skip_reason, wii_title_code_from_path,
 };
 use crate::sources::{EmulatorProfile, SourceKind, prepare_sources_for_sync};
 use crate::state::{
@@ -337,7 +336,11 @@ pub fn run_sync(
                     "Not retrying {}: the server refused it with {}{}",
                     save_path.display(),
                     prior.status,
-                    if prior.reason.is_empty() { String::new() } else { format!(": {}", prior.reason) }
+                    if prior.reason.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", prior.reason)
+                    }
                 );
                 continue;
             }

@@ -428,7 +428,6 @@ fn a_permanently_refused_save_is_not_uploaded_again() {
     assert_eq!(upload.calls(), 1);
 }
 
-
 #[test]
 fn sync_uploads_when_no_cloud_save_exists() {
     let server = MockServer::start();

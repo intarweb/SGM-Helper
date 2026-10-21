@@ -646,7 +646,8 @@ fn classify_core(
             "/gba/",
             "\\gba\\",
         ],
-    ) {        if is_plausible_save_for_system(&save_ext, save_size, "gba") {
+    ) {
+        if is_plausible_save_for_system(&save_ext, save_size, "gba") {
             return classify_if_valid(
                 save_path,
                 &save_ext,
@@ -1084,7 +1085,13 @@ fn infer_nintendo_slug(haystack: &str) -> Option<&'static str> {
     if contains_any(
         haystack,
         &[
-            "super nintendo", "/snes/", "\\snes\\", "/sfc/", "\\sfc\\", "snes9x", "bsnes",
+            "super nintendo",
+            "/snes/",
+            "\\snes\\",
+            "/sfc/",
+            "\\sfc\\",
+            "snes9x",
+            "bsnes",
         ],
     ) {
         return Some("snes");
@@ -1095,10 +1102,7 @@ fn infer_nintendo_slug(haystack: &str) -> Option<&'static str> {
     ) {
         return Some("nes");
     }
-    if contains_any(
-        haystack,
-        &["n3ds", "/3ds/", "\\3ds\\", "azahar", "citra"],
-    ) {
+    if contains_any(haystack, &["n3ds", "/3ds/", "\\3ds\\", "azahar", "citra"]) {
         return Some("3ds");
     }
     None
@@ -2430,8 +2434,14 @@ mod tests {
     fn azahar_and_n3ds_paths_resolve_to_the_3ds_slug() {
         // Without this arm every unmatched Nintendo path falls through to
         // "gameboy", so a 3DS save could be classified as the wrong system.
-        assert_eq!(infer_nintendo_slug("/saves/n3ds/azahar/nand/title/00040000"), Some("3ds"));
-        assert_eq!(infer_nintendo_slug("/saves/n3ds/azahar/sdmc/Nintendo 3DS"), Some("3ds"));
+        assert_eq!(
+            infer_nintendo_slug("/saves/n3ds/azahar/nand/title/00040000"),
+            Some("3ds")
+        );
+        assert_eq!(
+            infer_nintendo_slug("/saves/n3ds/azahar/sdmc/Nintendo 3DS"),
+            Some("3ds")
+        );
         assert_eq!(infer_nintendo_slug("/saves/3ds/citra"), Some("3ds"));
         assert_eq!(infer_nintendo_slug("/saves/gb/gameboy"), Some("gameboy"));
     }

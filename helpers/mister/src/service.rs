@@ -212,7 +212,8 @@ pub fn run_service(
                             report.rejected_permanent,
                             report.errors,
                             report.would_upload,
-                            report.would_download                        );
+                            report.would_download
+                        );
                     }
                     if report.errors == 0 {
                         runtime.last_sync_ok = Some(true);

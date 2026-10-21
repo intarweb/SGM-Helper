@@ -593,7 +593,8 @@ pub fn classify_supported_save(
             "/gba/",
             "\\gba\\",
         ],
-    ) {        if is_plausible_save_for_system(&save_ext, save_size, "gba") {
+    ) {
+        if is_plausible_save_for_system(&save_ext, save_size, "gba") {
             return classify_if_valid(
                 save_path,
                 &save_ext,
@@ -987,7 +988,13 @@ fn infer_nintendo_slug(haystack: &str) -> Option<&'static str> {
     if contains_any(
         haystack,
         &[
-            "super nintendo", "/snes/", "\\snes\\", "/sfc/", "\\sfc\\", "snes9x", "bsnes",
+            "super nintendo",
+            "/snes/",
+            "\\snes\\",
+            "/sfc/",
+            "\\sfc\\",
+            "snes9x",
+            "bsnes",
         ],
     ) {
         return Some("snes");
@@ -998,10 +1005,7 @@ fn infer_nintendo_slug(haystack: &str) -> Option<&'static str> {
     ) {
         return Some("nes");
     }
-    if contains_any(
-        haystack,
-        &["n3ds", "/3ds/", "\\3ds\\", "azahar", "citra"],
-    ) {
+    if contains_any(haystack, &["n3ds", "/3ds/", "\\3ds\\", "azahar", "citra"]) {
         return Some("3ds");
     }
     None
@@ -2343,7 +2347,10 @@ mod tests {
             infer_nintendo_slug("/saves/mupen64plus-next opengl"),
             Some("n64")
         );
-        assert_eq!(infer_nintendo_slug("/saves/gb/pokemon.sav"), Some("gameboy"));
+        assert_eq!(
+            infer_nintendo_slug("/saves/gb/pokemon.sav"),
+            Some("gameboy")
+        );
     }
 
     #[test]
@@ -2357,7 +2364,10 @@ mod tests {
             Some("3ds")
         );
         assert_eq!(infer_nintendo_slug("/saves/3ds/citra"), Some("3ds"));
-        assert_eq!(infer_nintendo_slug("/saves/gb/pokemon.sav"), Some("gameboy"));
+        assert_eq!(
+            infer_nintendo_slug("/saves/gb/pokemon.sav"),
+            Some("gameboy")
+        );
     }
 
     use super::*;
