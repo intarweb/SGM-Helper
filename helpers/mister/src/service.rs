@@ -17,7 +17,7 @@ use crate::api::ApiClient;
 use crate::config::AppConfig;
 use crate::sources::{SourceKind, load_source_store, resolved_sources_or_default};
 use crate::state::{AuthState, now_rfc3339};
-use crate::syncer::{SyncOptions, SyncReport, run_sync};
+use crate::syncer::{SyncOptions, SyncReport, dry_run_marker, run_sync};
 
 #[derive(Debug, Clone)]
 pub struct ServiceRunOptions {
@@ -199,7 +199,8 @@ pub fn run_service(
                 Ok(report) => {
                     if !quiet {
                         println!(
-                            "Service sync complete: scanned={} uploaded={} downloaded={} in_sync={} conflicts={} skipped={} errors={}",
+                            "Service sync complete{}: scanned={} uploaded={} downloaded={} in_sync={} conflicts={} skipped={} errors={}",
+                            dry_run_marker(&report),
                             report.scanned,
                             report.uploaded,
                             report.downloaded,
