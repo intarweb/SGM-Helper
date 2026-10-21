@@ -387,9 +387,13 @@ fn sync_uploads_when_no_cloud_save_exists() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("root");
     let state_dir = tmp.path().join("state");
-    fs::create_dir_all(root.join("Nintendo")).unwrap();
+    fs::create_dir_all(root.join("Nintendo/Game Boy")).unwrap();
     fs::create_dir_all(&state_dir).unwrap();
-    fs::write(root.join("Nintendo/wario.sav"), vec![0x00u8; 32768]).unwrap();
+    fs::write(
+        root.join("Nintendo/Game Boy/wario.sav"),
+        vec![0x00u8; 32768],
+    )
+    .unwrap();
     let config = write_config(&tmp, &server, &root, &state_dir);
 
     Command::cargo_bin("sgm-windows-helper")
@@ -461,9 +465,13 @@ fn sync_reports_conflict_when_backend_marks_conflict() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("root");
     let state_dir = tmp.path().join("state");
-    fs::create_dir_all(root.join("Nintendo")).unwrap();
+    fs::create_dir_all(root.join("Nintendo/Super Nintendo")).unwrap();
     fs::create_dir_all(&state_dir).unwrap();
-    fs::write(root.join("Nintendo/chrono.sav"), vec![0x00u8; 32768]).unwrap();
+    fs::write(
+        root.join("Nintendo/Super Nintendo/chrono.sav"),
+        vec![0x00u8; 32768],
+    )
+    .unwrap();
     let config = write_config(&tmp, &server, &root, &state_dir);
 
     Command::cargo_bin("sgm-windows-helper")
@@ -608,9 +616,13 @@ fn sync_auto_enrolls_when_gate_is_open_without_login() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("root");
     let state_dir = tmp.path().join("state");
-    fs::create_dir_all(root.join("Nintendo")).unwrap();
+    fs::create_dir_all(root.join("Nintendo/Game Boy")).unwrap();
     fs::create_dir_all(&state_dir).unwrap();
-    fs::write(root.join("Nintendo/wario.sav"), vec![0x00u8; 32768]).unwrap();
+    fs::write(
+        root.join("Nintendo/Game Boy/wario.sav"),
+        vec![0x00u8; 32768],
+    )
+    .unwrap();
     let config = write_config(&tmp, &server, &root, &state_dir);
 
     Command::cargo_bin("sgm-windows-helper")
