@@ -210,9 +210,7 @@ pub fn run_sync(
                 }
                 Err(err) => {
                     report.errors += 1;
-                    if verbose {
-                        eprintln!("Sync error for {}: {}", save_path.display(), err);
-                    }
+                    eprintln!("Sync error for {}: {}", save_path.display(), err);
                 }
             }
         }
@@ -273,9 +271,7 @@ pub fn run_sync(
                 }
                 Err(err) => {
                     report.errors += 1;
-                    if verbose {
-                        eprintln!("Restore error for {}: {}", save_path.display(), err);
-                    }
+                    eprintln!("Restore error for {}: {}", save_path.display(), err);
                 }
             }
         }
@@ -419,10 +415,8 @@ fn restore_cloud_only_saves(
                 Ok(()) => {}
                 Err(err) => {
                     report.errors += 1;
-                    if verbose {
-                        let label = cloud_save.display_name();
-                        eprintln!("Cloud restore error for '{}': {}", label, err);
-                    }
+                    let label = cloud_save.display_name();
+                    eprintln!("Cloud restore error for '{}': {}", label, err);
                 }
             }
         }
