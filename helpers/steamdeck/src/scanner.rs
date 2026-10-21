@@ -1573,6 +1573,66 @@ fn validate_n64_save_media(path: &Path, ext: &str, size: u64) -> bool {
     !(all_zero || all_ff)
 }
 
+const N64_PAK_PAGE_SIZE: usize = 256;
+const N64_PAK_ID_SIZE: usize = 32;
+const N64_PAK_ID_OFFSETS: [usize; 4] = [0x0020, 0x0060, 0x0080, 0x00c0];
+const N64_PAK_NOTE_COUNT: usize = 16;
+const N64_PAK_NOTE_SIZE: usize = 32;
+const N64_PAK_NOTE_START_PAGE: usize = 6;
+const N64_PAK_NOTE_NAME: usize = 12;
+const N64_PAK_FONT_SPACE: u8 = 0x0f;
+
+/// Counts the notes a controller pak's directory holds.
+///
+/// A pak that has never been written is a well-formed filesystem with sixteen
+/// empty slots, so it passes the blank check below; the server refuses it by
+/// parsing the directory and finding no entries.  Mirroring that here lets the
+/// caller stop sending it rather than collecting a rejection per pass.
+///
+/// Returns `None` when the payload cannot be read as a pak filesystem at all,
+/// leaving a damaged pak to the server's judgement.
+pub(crate) fn n64_controller_pak_entry_count(bytes: &[u8]) -> Option<usize> {
+    let bank_count = n64_controller_pak_bank_count(bytes)?;
+    let notes_offset = (1 + 2 * usize::from(bank_count)) * N64_PAK_PAGE_SIZE;
+    let notes_end = notes_offset + N64_PAK_NOTE_COUNT * N64_PAK_NOTE_SIZE;
+    let notes = bytes.get(notes_offset..notes_end)?;
+    Some(
+        notes
+            .chunks_exact(N64_PAK_NOTE_SIZE)
+            .filter(|note| {
+                let start_page = u16::from_be_bytes([
+                    note[N64_PAK_NOTE_START_PAGE],
+                    note[N64_PAK_NOTE_START_PAGE + 1],
+                ]);
+                start_page != 0 && !n64_controller_pak_note_name_is_blank(note)
+            })
+            .count(),
+    )
+}
+
+fn n64_controller_pak_bank_count(bytes: &[u8]) -> Option<u8> {
+    for base in N64_PAK_ID_OFFSETS {
+        let Some(sector) = bytes.get(base..base + N64_PAK_ID_SIZE) else {
+            continue;
+        };
+        let checksum = u16::from_be_bytes([sector[28], sector[29]]);
+        let checksum_inverse = u16::from_be_bytes([sector[30], sector[31]]);
+        let sum = sector[..28].chunks_exact(2).fold(0u16, |acc, pair| {
+            acc.wrapping_add(u16::from_be_bytes([pair[0], pair[1]]))
+        });
+        if sum == checksum && checksum_inverse == 0xfff2u16.wrapping_sub(sum) {
+            return Some(sector[26]);
+        }
+    }
+    None
+}
+
+fn n64_controller_pak_note_name_is_blank(note: &[u8]) -> bool {
+    note[N64_PAK_NOTE_NAME..]
+        .iter()
+        .all(|byte| *byte == 0x00 || *byte == N64_PAK_FONT_SPACE)
+}
+
 fn looks_like_executable_or_archive(path: &Path) -> bool {
     let Ok(file) = File::open(path) else {
         return false;
@@ -3398,5 +3458,74 @@ mod tests {
 
     fn write_be_u32(payload: &mut [u8], offset: usize, value: u32) {
         payload[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+    }
+
+    const REAL_CONTROLLER_PAK_ID_SECTOR: [u8; 32] = [
+        0xff, 0xff, 0xff, 0xff, 0x02, 0x9d, 0x4c, 0xe3, 0xa7, 0x45, 0x4f, 0x9b, 0xbf, 0x36, 0xb5,
+        0x6d, 0xfe, 0xda, 0xfd, 0xa4, 0xd3, 0x69, 0xb6, 0xd3, 0x20, 0x21, 0x01, 0x00, 0x62, 0xdc,
+        0x9d, 0x16,
+    ];
+
+    fn controller_pak(notes: &[(u16, [u8; 16])]) -> Vec<u8> {
+        let bank_count = 1u8;
+        let mut pak = vec![0u8; 32 * 1024];
+        let notes_offset = (1 + 2 * usize::from(bank_count)) * N64_PAK_PAGE_SIZE;
+        for (index, (start_page, name)) in notes.iter().enumerate() {
+            let base = notes_offset + index * N64_PAK_NOTE_SIZE;
+            pak[base + N64_PAK_NOTE_START_PAGE..base + N64_PAK_NOTE_START_PAGE + 2]
+                .copy_from_slice(&start_page.to_be_bytes());
+            pak[base + N64_PAK_NOTE_NAME..base + N64_PAK_NOTE_NAME + 16].copy_from_slice(name);
+        }
+        for base in N64_PAK_ID_OFFSETS {
+            let sector = &mut pak[base..base + N64_PAK_ID_SIZE];
+            sector[26] = bank_count;
+            let sum = sector[..28].chunks_exact(2).fold(0u16, |acc, pair| {
+                acc.wrapping_add(u16::from_be_bytes([pair[0], pair[1]]))
+            });
+            sector[28..30].copy_from_slice(&sum.to_be_bytes());
+            sector[30..32].copy_from_slice(&0xfff2u16.wrapping_sub(sum).to_be_bytes());
+        }
+        pak
+    }
+
+    #[test]
+    fn a_controller_pak_with_no_notes_has_no_entries() {
+        assert_eq!(
+            n64_controller_pak_entry_count(&controller_pak(&[])),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn a_controller_pak_with_a_note_has_an_entry() {
+        let pak = controller_pak(&[(5, *b"WIPEOUT 64      ")]);
+        assert_eq!(n64_controller_pak_entry_count(&pak), Some(1));
+    }
+
+    #[test]
+    fn a_note_holding_only_spaces_is_not_an_entry() {
+        let pak = controller_pak(&[(5, [N64_PAK_FONT_SPACE; 16])]);
+        assert_eq!(n64_controller_pak_entry_count(&pak), Some(0));
+    }
+
+    #[test]
+    fn a_pak_written_by_hardware_identifies_its_bank_count() {
+        let mut pak = vec![0u8; 32 * 1024];
+        pak[N64_PAK_ID_OFFSETS[0]..N64_PAK_ID_OFFSETS[0] + N64_PAK_ID_SIZE]
+            .copy_from_slice(&REAL_CONTROLLER_PAK_ID_SECTOR);
+        assert_eq!(n64_controller_pak_bank_count(&pak), Some(1));
+    }
+
+    #[test]
+    fn a_payload_that_is_not_a_pak_filesystem_is_left_to_the_server() {
+        assert_eq!(n64_controller_pak_entry_count(&[0x11u8; 32 * 1024]), None);
+    }
+
+    #[test]
+    fn a_note_slot_that_was_freed_is_not_an_entry() {
+        // A deleted note keeps its name but has no start page; the server's
+        // directory walk skips it, and so must the count.
+        let pak = controller_pak(&[(0, *b"FREED SLOT      ")]);
+        assert_eq!(n64_controller_pak_entry_count(&pak), Some(0));
     }
 }
