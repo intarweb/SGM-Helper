@@ -247,7 +247,8 @@ fn dispatch(cli: Cli, loaded: LoadedConfig) -> Result<()> {
 
             if !cli.quiet {
                 println!(
-                    "Sync complete: scanned={} uploaded={} downloaded={} in_sync={} conflicts={} skipped={} errors={}",
+                    "Sync complete: scanned={} uploaded={} downloaded={} in_sync={} conflicts={} skipped={} errors={}  \
+                     (scanned = local saves found once; skipped = per-pass decisions across upload and restore, so it can exceed scanned)",
                     report.scanned,
                     report.uploaded,
                     report.downloaded,
