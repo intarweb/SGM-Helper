@@ -31,6 +31,7 @@ const ALL_SYNC_SYSTEMS: &[&str] = &[
     "gba",
     "n64",
     "nds",
+    "arcade",
     "genesis",
     "master-system",
     "game-gear",

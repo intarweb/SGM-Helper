@@ -674,7 +674,7 @@ fn restore_cloud_only_saves(
 
         if verbose && offset == 0 {
             eprintln!(
-                "Cloud restore scan for source '{}' saw {} save track(s)",
+                "Cloud restore scan for source '{}' saw {} save track(s) in the account                  (this source's own files are counted above, not here)",
                 source_name, page.total
             );
         }

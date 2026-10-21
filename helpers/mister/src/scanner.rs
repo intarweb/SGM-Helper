@@ -133,6 +133,11 @@ fn discover_files_with_extensions(
             }
             let path = entry.path();
             let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
+                // MAME nvram components carry no extension; the path shape is
+                // the only thing that identifies them.
+                if is_mame_nvram_component(path) {
+                    files.push(path.to_path_buf());
+                }
                 continue;
             };
             if extensions
@@ -544,6 +549,24 @@ pub fn classify_supported_save(
     save_path: &Path,
     rom_path: Option<&Path>,
 ) -> Option<SaveClassification> {
+    // MAME writes one raw nvram component per machine -- `nvram/<machine>/
+    // eeprom`, `.../game`, `.../bmcu_mcu` -- with no extension at all. The
+    // shape of the path is the whole of the evidence, so this rule runs before
+    // anything that reads an extension.
+    if is_mame_nvram_component(save_path) {
+        let save_size = save_path.metadata().ok()?.len();
+        if !is_plausible_save_size(save_size) || looks_plain_text(save_path) {
+            return None;
+        }
+        return classify_if_valid(
+            save_path,
+            "",
+            save_size,
+            "arcade",
+            format!("mame nvram component ({} bytes)", save_size),
+        );
+    }
+
     let save_ext = path_extension(save_path)?;
 
     let save_size = save_path.metadata().ok()?.len();
@@ -1173,6 +1196,21 @@ fn system_slug_from_save_extension(ext: &str) -> Option<&'static str> {
     }
 }
 
+/// True for `<...>/nvram/<machine>/<file>`: a MAME machine's nvram file.
+///
+/// Both separators, because the scanner runs on Windows and on Linux and the
+/// paths it sees are whichever the device uses.
+fn is_mame_nvram_component(save_path: &Path) -> bool {
+    let normalized = save_path.to_string_lossy().replace('\\', "/");
+    let lowered = normalized.to_ascii_lowercase();
+    let Some((_, after)) = lowered.rsplit_once("/nvram/") else {
+        return false;
+    };
+    // <machine>/<file> -- a bare file under nvram/ is not a component.
+    let parts: Vec<&str> = after.split('/').filter(|part| !part.is_empty()).collect();
+    parts.len() == 2
+}
+
 fn is_plausible_save_size(size: u64) -> bool {
     size > 0 && size <= MAX_SAVE_BYTES
 }
@@ -1210,6 +1248,7 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
         // the payload is a .bin inside it, which is the file the helper syncs.
         "psp" => matches!(ext, "sav" | "srm" | "ram" | "bin"),
         "psvita" | "ps3" | "ps4" | "ps5" => matches!(ext, "sav" | "srm" | "ram"),
+        "arcade" => ext.is_empty() || matches!(ext, "sav" | "srm" | "bin"),
         _ => false,
     };
     if !extension_ok {
@@ -1252,6 +1291,11 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
         // fell through to `false` and was dropped as unsupported, whatever its
         // size and whatever the extension set above accepted.
         "3ds" => (512..=16_777_216).contains(&size),
+        // An nvram component is whatever the machine writes -- 512 B for an
+        // eeprom, 8 GiB never, 8 KiB for a video eeprom or a game's backup. A
+        // size table here would reject real machines, so the path is the
+        // evidence.
+        "arcade" => true,
         "genesis" | "master-system" | "game-gear" | "sega-cd" | "sega-32x" => {
             matches!(
                 size,
@@ -3372,5 +3416,55 @@ mod tests {
             classify_supported_save(&save, None).map(|value| value.system_slug),
             Some("3ds".to_string())
         );
+    }
+
+    #[test]
+    fn a_mame_nvram_component_classifies_as_arcade() {
+        // One raw file per machine, no extension: `nvram/<machine>/<file>` is
+        // the whole of the evidence.
+        let tmp = tempfile::tempdir().unwrap();
+        for (machine, file, size) in [
+            ("akatana", "eeprom", 512u64),
+            ("acedrvrw", "eeprom", 8192),
+            ("akatana", "game", 8468),
+            ("alcon", "bmcu_mcu", 2048),
+        ] {
+            let path = tmp
+                .path()
+                .join(format!("MAME-0.288/nvram/{machine}/{file}"));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, vec![0xffu8; size as usize]).unwrap();
+            assert_eq!(
+                classify_supported_save(&path, None).map(|value| value.system_slug),
+                Some("arcade".to_string()),
+                "{machine}/{file} ({size} bytes)"
+            );
+        }
+    }
+
+    #[test]
+    fn an_nvram_directory_entry_without_a_machine_is_not_a_component() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("MAME-0.288/nvram/loose_file");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, vec![0xffu8; 1024]).unwrap();
+        assert_eq!(classify_supported_save(&path, None), None);
+    }
+
+    #[test]
+    fn discovery_finds_extensionless_nvram_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = tmp.path().join("nvram/akatana");
+        fs::create_dir_all(&machine).unwrap();
+        fs::write(machine.join("eeprom"), vec![0xffu8; 512]).unwrap();
+        fs::write(machine.join("game"), vec![0xffu8; 8468]).unwrap();
+        fs::write(machine.join("notes.txt"), b"not a save").unwrap();
+
+        let found = discover_save_files(&[tmp.path().to_path_buf()], true).unwrap();
+        let names: Vec<String> = found
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["eeprom".to_string(), "game".to_string()]);
     }
 }
