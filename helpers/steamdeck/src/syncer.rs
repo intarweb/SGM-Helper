@@ -237,6 +237,7 @@ pub fn run_sync(
                     &api,
                     &save_path,
                     &save_key,
+                    sync_state.entries.get(&save_key),
                     &fingerprint,
                     &source.name,
                     &source.kind,
@@ -1481,6 +1482,7 @@ fn process_single_save(
     api: &ApiClient,
     save_path: &std::path::Path,
     save_key: &str,
+    prior_entry: Option<&SyncedEntry>,
     fingerprint: &str,
     source_name: &str,
     source_kind: &SourceKind,
@@ -1826,6 +1828,26 @@ fn process_single_save(
                 Some(&effective_slot_name),
             ),
         )));
+    }
+
+    // Three-way: what did we last agree with the server on?  Comparing local
+    // against remote alone cannot tell "the user just saved" from "the server has
+    // something new", so a divergence was resolved by asking the server, which can
+    // only see its own side.
+    if let Some(prior) = prior_entry {
+        let last = prior.sha256.as_str();
+        let remote = latest.sha256.as_deref().unwrap_or("");
+        if last != local_sha.as_str() && last != remote {
+            // Both sides moved, and neither is more real.  Touch neither.
+            report.conflicts += 1;
+            eprintln!(
+                "Sync conflict for {}: local {} and server {} both changed since the last sync; leaving both untouched",
+                save_path.display(),
+                &local_sha[..local_sha.len().min(8)],
+                &remote[..remote.len().min(8)]
+            );
+            return Ok(Some(processed_entry(state_key.clone(), prior.clone())));
+        }
     }
 
     if latest.sha256.as_deref() == Some(local_sha.as_str()) {
