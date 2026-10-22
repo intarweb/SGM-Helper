@@ -132,18 +132,20 @@ fn discover_files_with_extensions(
                 continue;
             }
             let path = entry.path();
-            let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
-                // MAME nvram components carry no extension; the path shape is
-                // the only thing that identifies them.
-                if is_mame_nvram_component(path) {
-                    files.push(path.to_path_buf());
-                }
-                continue;
-            };
-            if extensions
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(ext))
-            {
+            let known_extension = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|ext| {
+                    extensions
+                        .iter()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(ext))
+                })
+                .unwrap_or(false);
+            // A MAME nvram file is named after a chip or a ROM, so it may carry
+            // an extension the scanner does not know (`29f016a.27h`, `smw.nv`).
+            // The path shape identifies it; a console-save extension means
+            // another classifier owns the file and it is admitted as usual.
+            if known_extension || (is_mame_nvram_component(path) && !looks_plain_text(path)) {
                 files.push(path.to_path_buf());
             }
         }
@@ -3593,5 +3595,45 @@ mod tests {
                 assert_eq!(got.as_deref(), want, "{relative}");
             }
         }
+    }
+
+    #[test]
+    fn discovery_finds_mame_files_with_unknown_extensions() {
+        // MAME names a nvram file after a chip or a ROM: `smw.nv`,
+        // `29f016a.27h`. Those extensions are not console saves, so the
+        // extension set never admitted them and 12 real files never synced.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("nvram");
+        for relative in [
+            "snes/smw.nv",
+            "ddr2m/29f016a.27h",
+            "sfa3/eeprom",
+            "snes/F-Zero (USA).srm",
+            "snes/notes.txt",
+        ] {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            if relative.ends_with(".txt") {
+                fs::write(&path, b"these are notes, not a save\n").unwrap();
+            } else {
+                fs::write(&path, vec![0xffu8; 2048]).unwrap();
+            }
+        }
+
+        let found = discover_save_files(&[tmp.path().to_path_buf()], true).unwrap();
+        let names: Vec<String> = found
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        for want in ["smw.nv", "29f016a.27h", "eeprom", "F-Zero (USA).srm"] {
+            assert!(
+                names.iter().any(|name| name == want),
+                "missing {want} in {names:?}"
+            );
+        }
+        assert!(
+            !names.iter().any(|name| name == "notes.txt"),
+            "admitted a non-save"
+        );
     }
 }
