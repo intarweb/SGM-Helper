@@ -14,9 +14,9 @@ use crate::scanner::{
     RomIndexEntry, SaveAdapterProfile, SaveContainerFormat, classify_supported_save,
     discover_rom_index, discover_save_files, dreamcast_skip_reason,
     encode_download_for_local_container, filename_stem, is_mame_nvram_component,
-    mame_nvram_machine, md5_file, n64_controller_pak_entry_count, normalize_save_bytes_for_sync,
-    normalize_save_for_sync, saturn_skip_reason, sha1_file, sha256_bytes, sha256_file,
-    wii_skip_reason, wii_title_code_from_path,
+    is_n64_retroarch_bundle, mame_nvram_machine, md5_file, n64_controller_pak_entry_count,
+    normalize_save_bytes_for_sync, normalize_save_for_sync, saturn_skip_reason, sha1_file,
+    sha256_bytes, sha256_file, wii_skip_reason, wii_title_code_from_path,
 };
 use crate::sources::{EmulatorProfile, SourceKind, prepare_sources_for_sync};
 use crate::state::{
@@ -1530,8 +1530,16 @@ fn process_single_save(
     let effective_slot_name =
         resolve_slot_name_for_sync(&system_slug, save_path, &options.slot_name);
     let device_type = helper_device_type_for_upload(source_kind, &effective_profile, &system_slug);
-    let runtime_target =
+    let mut runtime_target =
         runtime_target_for_system(source_kind, &effective_profile, &system_slug, device_type);
+    // A combined N64 save is RetroArch's own form whatever the source profile
+    // says: mupen64plus-next writes one file holding EEPROM, pak templates,
+    // SRAM and FlashRAM, and the server splits it only for that profile. The
+    // device profile can be Generic (a SteamDeck) or MupenFamily, neither of
+    // which accepts the bundle, so the file itself decides.
+    if system_slug == "n64" && is_n64_retroarch_bundle(save_path) {
+        runtime_target = runtime_target_for_profile(&system_slug, "n64/retroarch");
+    }
 
     let mut rom_sha1 = if is_playstation_system(&system_slug) {
         Some(playstation_line_key(
@@ -2365,16 +2373,19 @@ fn runtime_target_for_system(
         return RuntimeTarget::default();
     };
 
+    runtime_target_for_profile(&clean_system, &runtime_profile)
+}
+
+fn runtime_target_for_profile(system_slug: &str, runtime_profile: &str) -> RuntimeTarget {
     let profile_name = runtime_profile
         .split_once('/')
         .map(|(_, value)| value.to_string())
-        .unwrap_or_else(|| runtime_profile.clone());
-
+        .unwrap_or_else(|| runtime_profile.to_string());
     RuntimeTarget {
-        runtime_profile: Some(runtime_profile.clone()),
+        runtime_profile: Some(runtime_profile.to_string()),
         emulator_profile: Some(profile_name),
-        system_profile_key: Some(system_profile_field_key(&clean_system)),
-        system_profile_value: Some(runtime_profile),
+        system_profile_key: Some(system_profile_field_key(system_slug)),
+        system_profile_value: Some(runtime_profile.to_string()),
     }
 }
 
