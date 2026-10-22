@@ -20,7 +20,7 @@ use crate::scanner::{
     ps2_skip_reason, saturn_skip_reason, sha1_file, sha256_bytes, sha256_file, sidecar_label,
     wii_skip_reason, wii_title_code_from_path,
 };
-use crate::sources::{EmulatorProfile, SourceKind, prepare_sources_for_sync};
+use crate::sources::{EmulatorProfile, ResolvedSource, SourceKind, prepare_sources_for_sync};
 use crate::state::{
     AuthState, RememberedBackendPolicy, SyncedEntry, TerminalRejection,
     load_remembered_backend_policy, load_sync_state, now_rfc3339, save_remembered_backend_policy,
@@ -315,6 +315,67 @@ impl Drop for SyncLock {
     }
 }
 
+/// Give each save root to one source.
+///
+/// An install can end up with the auto-created default source and an explicitly
+/// configured one over the same directory -- a RetroDECK device gets both -- and
+/// then every save in it is processed twice, by two sources that can disagree
+/// about the profile. The configured source owns the root; an auto-created
+/// default yields to it and says so. Two configured sources over one root is the
+/// operator's arrangement, so both stay and the overlap is reported.
+fn prefer_configured_sources(sources: Vec<ResolvedSource>) -> (Vec<ResolvedSource>, Vec<String>) {
+    fn is_auto_default(source: &ResolvedSource) -> bool {
+        let origin = source.origin.to_ascii_lowercase();
+        origin == "auto" || origin == "default" || origin == "autoscan-default"
+    }
+
+    let (defaults, configured): (Vec<ResolvedSource>, Vec<ResolvedSource>) =
+        sources.into_iter().partition(is_auto_default);
+    let mut notices = Vec::new();
+
+    let mut claimed: Vec<(PathBuf, String)> = Vec::new();
+    for source in &configured {
+        for root in &source.save_roots {
+            if let Some((_, owner)) = claimed.iter().find(|(held, _)| held == root) {
+                notices.push(format!(
+                    "Warning: sources '{}' and '{}' both claim {}; both run, and the order decides which handles a save",
+                    owner,
+                    source.name,
+                    root.display()
+                ));
+            } else {
+                claimed.push((root.clone(), source.name.clone()));
+            }
+        }
+    }
+
+    let mut kept = configured;
+    for source in defaults {
+        let shared = source.save_roots.iter().find_map(|root| {
+            claimed
+                .iter()
+                .find(|(held, _)| held == root)
+                .map(|(_, owner)| (root.clone(), owner.clone()))
+        });
+        match shared {
+            Some((root, owner)) => notices.push(format!(
+                "Source '{}' shares {} with '{}'; '{}' handles it",
+                source.name,
+                root.display(),
+                owner,
+                owner
+            )),
+            None => {
+                for root in &source.save_roots {
+                    claimed.push((root.clone(), source.name.clone()));
+                }
+                kept.push(source);
+            }
+        }
+    }
+    (kept, notices)
+}
+
 pub fn run_sync(
     config: &AppConfig,
     auth: Option<&AuthState>,
@@ -330,7 +391,7 @@ pub fn run_sync(
     let token = auth.map(|value| value.token.clone());
     let api = ApiClient::new(config.base_url(), config.route_prefix.clone(), token)?;
 
-    let mut sources = prepare_sources_for_sync(
+    let sources = prepare_sources_for_sync(
         config,
         options.default_source_kind.clone(),
         options.scan,
@@ -338,6 +399,10 @@ pub fn run_sync(
         options.apply_scan,
         verbose,
     )?;
+    let (mut sources, source_notices) = prefer_configured_sources(sources);
+    for notice in &source_notices {
+        eprintln!("{}", notice);
+    }
     let app_password = if config.app_password.trim().is_empty() {
         None
     } else {
@@ -5095,6 +5160,86 @@ mod tests {
             !existing_local_save_is_valid(&cpk, "n64", false),
             "a controller pak satisfied a primary track's presence check"
         );
+    }
+
+    fn resolved_source(
+        name: &str,
+        kind: SourceKind,
+        profile: EmulatorProfile,
+        root: &str,
+        origin: &str,
+    ) -> ResolvedSource {
+        ResolvedSource {
+            id: name.to_string(),
+            name: name.to_string(),
+            kind,
+            profile,
+            save_roots: vec![PathBuf::from(root)],
+            rom_roots: vec![],
+            recursive: true,
+            systems: vec![],
+            create_missing_system_dirs: false,
+            managed: false,
+            origin: origin.to_string(),
+        }
+    }
+
+    // A RetroDECK install gets an auto-created default source as well as the
+    // configured one, both over the same saves directory. Every save then runs
+    // twice, and the second run asked the server for a different N64 profile.
+    #[test]
+    fn an_auto_default_source_yields_its_root_to_a_configured_one() {
+        let configured = resolved_source(
+            "retrodeck",
+            SourceKind::RetroArch,
+            EmulatorProfile::RetroArch,
+            "/home/deck/retrodeck/saves",
+            "manual",
+        );
+        let auto = resolved_source(
+            "steamdeck_default",
+            SourceKind::SteamDeck,
+            EmulatorProfile::Generic,
+            "/home/deck/retrodeck/saves",
+            "autoscan-default",
+        );
+
+        let (kept, notices) = prefer_configured_sources(vec![auto, configured]);
+
+        assert_eq!(kept.len(), 1, "the auto source was kept");
+        assert_eq!(kept[0].name, "retrodeck");
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].contains("steamdeck_default") && notices[0].contains("retrodeck"),
+            "the skip does not name both sources: {}",
+            notices[0]
+        );
+    }
+
+    // Two configured sources over one root is the operator's arrangement: both
+    // run as before, and the overlap is reported rather than resolved.
+    #[test]
+    fn two_configured_sources_over_one_root_are_reported_not_removed() {
+        let first = resolved_source(
+            "retrodeck",
+            SourceKind::RetroArch,
+            EmulatorProfile::RetroArch,
+            "/home/deck/retrodeck/saves",
+            "manual",
+        );
+        let second = resolved_source(
+            "second",
+            SourceKind::SteamDeck,
+            EmulatorProfile::Generic,
+            "/home/deck/retrodeck/saves",
+            "manual",
+        );
+
+        let (kept, notices) = prefer_configured_sources(vec![first, second]);
+
+        assert_eq!(kept.len(), 2);
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("both claim"), "{}", notices[0]);
     }
 
     fn cloud_save(
