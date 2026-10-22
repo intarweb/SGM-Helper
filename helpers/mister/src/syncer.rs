@@ -552,7 +552,7 @@ pub fn run_sync(
                                 status,
                                 reason: format!("{err:#}"),
                                 recorded_at: now_rfc3339(),
-                                helper_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                                helper_version: Some(crate::state::build_identity().to_string()),
                             },
                         );
                     } else {

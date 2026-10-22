@@ -3322,7 +3322,7 @@ fn a_refusal_from_this_release_is_not_probed_again() {
         &state_dir,
         &save,
         &recorded_at,
-        Some(env!("CARGO_PKG_VERSION")),
+        Some(sgm_steamdeck_helper::state::build_identity()),
     );
     let config = write_config(&tmp, &server, &root, &state_dir);
 

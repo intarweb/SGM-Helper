@@ -80,8 +80,16 @@ pub const TERMINAL_REJECTION_LIFETIME_DAYS: i64 = 14;
 /// and be younger than the lifetime. A marker written before the release was
 /// recorded cannot be dated to a version, so it is treated as stale -- which
 /// is how the markers left by older builds get cleared.
+/// The identity of this build: the release workflow's SGM_BUILD_ID, else the
+/// commit the binary was built from, else the package version. Every fork build
+/// carries the same package version, so the version alone cannot tell a fixed
+/// binary from the one that recorded a refusal.
+pub fn build_identity() -> &'static str {
+    option_env!("SGM_BUILD_ID").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 pub fn terminal_rejection_is_current(prior: &TerminalRejection) -> bool {
-    if prior.helper_version.as_deref() != Some(env!("CARGO_PKG_VERSION")) {
+    if prior.helper_version.as_deref() != Some(build_identity()) {
         return false;
     }
     let Ok(recorded_at) = OffsetDateTime::parse(&prior.recorded_at, &Rfc3339) else {
@@ -329,7 +337,7 @@ mod tests {
     fn a_refusal_from_this_release_still_stands() {
         assert!(terminal_rejection_is_current(&rejection(
             now_rfc3339(),
-            Some(env!("CARGO_PKG_VERSION"))
+            Some(build_identity())
         )));
     }
 
@@ -338,6 +346,21 @@ mod tests {
         assert!(!terminal_rejection_is_current(&rejection(
             now_rfc3339(),
             Some("0.0.1")
+        )));
+    }
+
+    #[test]
+    fn a_refusal_naming_only_the_version_is_stale() {
+        // Every fork build reports the same package version, so a marker that
+        // names only the version cannot tell a fixed binary from the one that
+        // recorded the refusal. It is treated as another build's.
+        let version = env!("CARGO_PKG_VERSION");
+        if build_identity() == version {
+            return; // no build identity available in this build
+        }
+        assert!(!terminal_rejection_is_current(&rejection(
+            now_rfc3339(),
+            Some(version)
         )));
     }
 
