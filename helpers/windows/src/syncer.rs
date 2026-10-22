@@ -108,6 +108,24 @@ impl SyncReport {
 /// Every upload names the file it took and the record it produced. Without
 /// this, one file re-uploaded every pass cannot be told from a healthy run:
 /// the only per-file lines were refusals.
+/// An upload the server accepts but stores in a different form leaves the
+/// state entry claiming a payload the store does not hold: the next pass sees
+/// the store's form, uploads again, and the record never converges. Say so
+/// the first time it happens rather than letting it read as in sync.
+fn report_stored_sha(save_path: &Path, sent_sha: &str, stored_sha: Option<&str>) {
+    if let Some(stored) = stored_sha
+        && !stored.is_empty()
+        && stored != sent_sha
+    {
+        eprintln!(
+            "Server stored a different payload for {}: sent sha256 {}, stored {}",
+            save_path.display(),
+            sent_sha,
+            stored
+        );
+    }
+}
+
 fn settle_upload(
     report: &mut SyncReport,
     path: &std::path::Path,
@@ -2515,6 +2533,7 @@ fn process_single_save(
             {
                 Some(save) => {
                     duplicate_uploaded = response.declined_duplicate();
+                    report_stored_sha(save_path, &local_sha, save.sha256.as_deref());
                     upload_id = save.id.clone();
                     save.version
                 }
@@ -2614,6 +2633,7 @@ fn process_single_save(
             {
                 Some(save) => {
                     duplicate_uploaded = response.declined_duplicate();
+                    report_stored_sha(save_path, &local_sha, save.sha256.as_deref());
                     upload_id = save.id.clone();
                     save.version
                 }
@@ -2738,6 +2758,14 @@ fn process_single_save(
                 arcade_machine.as_deref(),
                 Some(&runtime_target),
             )?;
+            report_stored_sha(
+                save_path,
+                &local_sha,
+                response
+                    .save
+                    .as_ref()
+                    .and_then(|save| save.sha256.as_deref()),
+            );
             settle_upload(
                 report,
                 save_path,
@@ -2802,6 +2830,14 @@ fn process_single_save(
                     arcade_machine.as_deref(),
                     Some(&runtime_target),
                 )?;
+                report_stored_sha(
+                    save_path,
+                    &local_sha,
+                    response
+                        .save
+                        .as_ref()
+                        .and_then(|save| save.sha256.as_deref()),
+                );
                 settle_upload(
                     report,
                     save_path,
@@ -2885,6 +2921,14 @@ fn process_single_save(
             arcade_machine.as_deref(),
             Some(&runtime_target),
         )?;
+        report_stored_sha(
+            save_path,
+            &local_sha,
+            response
+                .save
+                .as_ref()
+                .and_then(|save| save.sha256.as_deref()),
+        );
         settle_upload(
             report,
             save_path,
@@ -2966,6 +3010,14 @@ fn process_single_save(
                     arcade_machine.as_deref(),
                     Some(&runtime_target),
                 )?;
+                report_stored_sha(
+                    save_path,
+                    &local_sha,
+                    response
+                        .save
+                        .as_ref()
+                        .and_then(|save| save.sha256.as_deref()),
+                );
                 settle_upload(
                     report,
                     save_path,
