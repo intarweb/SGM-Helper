@@ -228,6 +228,7 @@ fn system_for_rom_path(path: &Path) -> Option<&'static str> {
 }
 
 pub fn discover_rom_index(
+    source_name: &str,
     roots: &[PathBuf],
     recursive: bool,
 ) -> Result<HashMap<String, RomIndexEntry>> {
@@ -239,8 +240,9 @@ pub fn discover_rom_index(
         let exists = root.exists();
         if !exists {
             eprintln!(
-                "Warning: ROM root {} does not exist: nothing under it is indexed",
-                root.display()
+                "Warning: ROM root {} in source '{}' does not exist: nothing under it is indexed",
+                root.display(),
+                source_name
             );
         }
         let files = if exists {
@@ -249,8 +251,9 @@ pub fn discover_rom_index(
             Vec::new()
         };
         eprintln!(
-            "ROM root {}: exists={}, indexed={}",
+            "ROM root {} in source '{}': exists={}, indexed={}",
             root.display(),
+            source_name,
             exists,
             files.len()
         );
@@ -3560,7 +3563,7 @@ mod tests {
         fs::write(roms.join("Sega Genesis/Tecmo Super Bowl (USA).md"), b"x").unwrap();
         fs::write(roms.join("Nintendo NES/Tecmo Super Bowl (USA).nes"), b"x").unwrap();
 
-        let index = discover_rom_index(&[roms], true).unwrap();
+        let index = discover_rom_index("test", &[roms], true).unwrap();
         let entry = index.get("tecmo super bowl (usa)").unwrap();
         assert!(
             entry.ambiguous,
@@ -3575,7 +3578,7 @@ mod tests {
         fs::create_dir_all(roms.join("Sega Genesis")).unwrap();
         fs::write(roms.join("Sega Genesis/Sonic the Hedgehog (USA).md"), b"x").unwrap();
 
-        let index = discover_rom_index(&[roms], true).unwrap();
+        let index = discover_rom_index("test", &[roms], true).unwrap();
         let entry = index.get("sonic the hedgehog (usa)").unwrap();
         assert!(!entry.ambiguous);
     }
