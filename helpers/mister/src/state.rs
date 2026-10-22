@@ -133,6 +133,28 @@ pub fn sync_state_path(state_dir: &Path) -> PathBuf {
 
 /// The last backend policy this device received, so a failed fetch cannot
 /// silently drop a server-forced dry run and sync live.
+/// Write `body` as `<dir>/startup-error.log`, trying each directory in turn and
+/// returning the file it managed to write.
+///
+/// The helper's console is hidden by the launcher that starts it, and the
+/// launcher discards the helper's stderr: a run that dies before it can say
+/// anything leaves no trace at all, and the failure is indistinguishable from a
+/// task that simply did not fire. A file the operator can open is the difference
+/// between a five-minute fix and an afternoon of guessing. Later runs replace the
+/// file, so it always holds the most recent fatal error.
+pub fn write_startup_error(dirs: &[PathBuf], body: &str) -> Option<PathBuf> {
+    for dir in dirs {
+        let path = dir.join("startup-error.log");
+        if fs::create_dir_all(dir).is_err() {
+            continue;
+        }
+        if fs::write(&path, body).is_ok() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Create the state directory, treating one that is already there as success.
 ///
 /// `create_dir_all` is meant to be indifferent to an existing directory, but on
@@ -446,6 +468,42 @@ mod tests {
             err.contains("kan state map niet maken") && err.contains("a file is in the way"),
             "the failure does not say what is wrong: {err}"
         );
+    }
+
+    #[test]
+    fn a_startup_error_is_written_to_the_first_usable_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("state");
+        let second = tmp.path().join("other");
+
+        let path = write_startup_error(&[first.clone(), second.clone()], "boom\n").unwrap();
+
+        assert_eq!(path, first.join("startup-error.log"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "boom\n");
+        assert!(!second.exists());
+    }
+
+    #[test]
+    fn a_directory_that_cannot_be_used_is_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocked = tmp.path().join("blocked");
+        fs::write(&blocked, "not a directory").unwrap();
+        let usable = tmp.path().join("usable");
+
+        let path = write_startup_error(&[blocked, usable.clone()], "boom\n").unwrap();
+
+        assert_eq!(path, usable.join("startup-error.log"));
+    }
+
+    #[test]
+    fn a_later_startup_error_replaces_the_earlier_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("state");
+
+        write_startup_error(std::slice::from_ref(&dir), "first\n").unwrap();
+        let path = write_startup_error(std::slice::from_ref(&dir), "second\n").unwrap();
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "second\n");
     }
 
     #[test]

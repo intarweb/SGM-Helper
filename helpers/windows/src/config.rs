@@ -195,7 +195,7 @@ impl AppConfig {
     }
 }
 
-fn default_binary_dir() -> Result<PathBuf> {
+pub(crate) fn default_binary_dir() -> Result<PathBuf> {
     let exe = env::current_exe().context("kan huidige executable pad niet bepalen")?;
     let dir = exe
         .parent()

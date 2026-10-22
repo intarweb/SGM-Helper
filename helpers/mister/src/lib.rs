@@ -24,7 +24,7 @@ use crate::cli::{
     Cli, Commands, ConfigCommand, ScheduleCommand, ServiceCommand, SourceAddCommand, SourceCommand,
     StateCommand,
 };
-use crate::config::{AppConfig, ConfigOverrides, LoadedConfig};
+use crate::config::{AppConfig, ConfigOverrides, LoadedConfig, default_binary_dir};
 use crate::scanner::{
     SaveContainerFormat, encode_download_for_local_container, normalize_save_bytes_for_sync,
 };
@@ -68,6 +68,71 @@ pub fn run() -> Result<()> {
 
     let loaded = LoadedConfig::load(cli.config.clone(), &global_overrides)?;
     dispatch(cli, loaded)
+}
+
+/// Record a fatal error where the operator can find it after the fact.
+///
+/// The helper normally runs under a launcher that hides the console and throws
+/// stderr away, so the error printed on the way out is lost. This writes the
+/// same error to `<state dir>/startup-error.log`, falling back to the config
+/// file's directory, the binary's directory and the working directory -- the
+/// state directory being unusable is itself one of the ways a run fails at
+/// startup.
+pub fn record_fatal_error(err: &anyhow::Error) {
+    let body = format!("{}\n{err:#}\n", state::now_rfc3339());
+    state::write_startup_error(&fatal_error_directories(), &body);
+}
+
+fn fatal_error_directories() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(dir) = argument_value("--state-dir") {
+        dirs.push(PathBuf::from(dir));
+    }
+    match LoadedConfig::load(
+        argument_value("--config").map(PathBuf::from),
+        &ConfigOverrides::default(),
+    ) {
+        Ok(loaded) => {
+            if let Ok(dir) = loaded.config.resolved_state_dir() {
+                dirs.push(dir);
+            }
+            if let Some(parent) = loaded.config_path.parent() {
+                dirs.push(parent.to_path_buf());
+            }
+        }
+        Err(_) => {
+            let config_parent = argument_value("--config")
+                .and_then(|path| Path::new(&path).parent().map(Path::to_path_buf));
+            if let Some(parent) = config_parent {
+                dirs.push(parent);
+            }
+        }
+    }
+    if let Ok(dir) = default_binary_dir() {
+        dirs.push(dir);
+    }
+    if let Ok(dir) = std::env::current_dir() {
+        dirs.push(dir);
+    }
+    dirs
+}
+
+/// The value of `--name value` or `--name=value` on the command line.
+///
+/// Read from the raw arguments rather than from the parsed CLI because this runs
+/// when the CLI may be exactly what failed to parse.
+fn argument_value(name: &str) -> Option<String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let prefix = format!("{name}=");
+    for (index, arg) in args.iter().enumerate() {
+        if let Some(value) = arg.strip_prefix(&prefix) {
+            return Some(value.to_string());
+        }
+        if arg == name {
+            return args.get(index + 1).cloned();
+        }
+    }
+    None
 }
 
 fn dispatch(cli: Cli, loaded: LoadedConfig) -> Result<()> {
