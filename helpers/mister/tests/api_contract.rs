@@ -3420,3 +3420,183 @@ fn a_pc_engine_upload_declares_its_runtime_profile() {
         "a PC Engine upload did not declare pc-engine/retroarch-beetle-pce:\n{stdout}\n{stderr}"
     );
 }
+
+fn dryrun_helper() -> Command {
+    Command::cargo_bin("sgm-mister-helper").unwrap()
+}
+
+// A dry run looks without touching: it must not upload. The backend can force a
+// dry run (covered elsewhere); this is the operator's own flag, on a save that
+// would otherwise upload.
+#[test]
+fn a_cli_dry_run_uploads_nothing() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_clidry","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"clidry@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"clidry123","md5":"md5v","fileName":"madden.rom"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(
+                r#"{"success":true,"save":{"id":"save-clidry","sha256":"sha-clidry","version":1}}"#,
+            );
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Sega/Genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("Sega/Genesis/Madden NFL 94.srm"),
+        vec![0xC7u8; 2114],
+    )
+    .unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    dryrun_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("clidry@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = dryrun_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .arg("--dry-run")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(upload.calls(), 0, "a dry run uploaded:\n{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("DRY RUN"),
+        "the summary does not say it was a dry run:\n{stdout}\nSTDERR: {stderr}"
+    );
+}
+
+fn override_helper() -> Command {
+    Command::cargo_bin("sgm-mister-helper").unwrap()
+}
+
+// The backend may force a dry run; it may not turn one the operator asked for
+// into a live sync. The flag is the thing an operator uses to look at a store
+// without changing it.
+#[test]
+fn a_backend_policy_does_not_cancel_a_requested_dry_run() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_override","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"override@example.com"}}"#);
+    });
+    let _config_sync = server.mock(|when, then| {
+        when.method(POST).path("/helpers/config/sync");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"accepted":true,"global":{"dryRun":false}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"override123","md5":"md5v","fileName":"madden.rom"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-override","sha256":"sha-override","version":1}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Sega/Genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("Sega/Genesis/Madden NFL 94.srm"),
+        vec![0xC7u8; 2114],
+    )
+    .unwrap();
+    let config = tmp.path().join("config-override.ini");
+    fs::write(
+        &config,
+        format!(
+            "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.genesis]\nLABEL=\"genesis\"\nKIND=\"retroarch\"\nPROFILE=\"retroarch\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"genesis\"\n",
+            server.port(),
+            root.display(),
+            state_dir.display(),
+            root.join("Sega").display(),
+            root.join("roms").display()
+        ),
+    )
+    .unwrap();
+
+    override_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("override@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = override_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .arg("--dry-run")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        upload.calls(),
+        0,
+        "a backend policy turned a requested dry run into a live sync:\n{stdout}\n{stderr}"
+    );
+}

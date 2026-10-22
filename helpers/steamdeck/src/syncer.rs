@@ -330,7 +330,11 @@ pub fn run_sync(
                 effective_options.force_upload = value;
             }
             if let Some(value) = overrides.dry_run {
-                effective_options.dry_run = value;
+                // A backend may force a dry run; it may not turn one the
+                // operator asked for into a live sync. The flag is how an
+                // operator looks at a store without changing it, and a policy
+                // that wins over it makes --dry-run a request to be ignored.
+                effective_options.dry_run = options.dry_run || value;
             }
             // Remember what the server last told this device. A fetch that
             // fails later must not turn a server-forced dry run into a live
@@ -356,7 +360,7 @@ pub fn run_sync(
                     effective_options.force_upload = value;
                 }
                 if let Some(value) = remembered.dry_run {
-                    effective_options.dry_run = value;
+                    effective_options.dry_run = options.dry_run || value;
                 }
                 eprintln!(
                     "Backend config unavailable; applying the last policy it sent (dry_run={} force_upload={})",
