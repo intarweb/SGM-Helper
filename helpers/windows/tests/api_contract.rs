@@ -3231,3 +3231,72 @@ fn a_resolved_title_is_not_reported_as_a_placeholder() {
         "a resolved record was reported as a placeholder:\n{stderr}"
     );
 }
+
+fn ps2_helper() -> Command {
+    Command::cargo_bin("sgm-windows-helper").unwrap()
+}
+
+// A PCSX2 memory card is a PS2 filesystem image. A file that does not begin
+// with the superblock is not a card at all, and the generic "no system profile
+// accepts a 8650752 byte .ps2 file" sends an operator looking for a missing
+// size-table entry. The refusal says what it actually is.
+#[test]
+fn an_unformatted_ps2_memory_card_says_why_it_is_refused() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_ps2","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"ps2@example.com"}}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-ps2","sha256":"sha-ps2","version":1}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    let card = root.join("saves/ps2/pcsx2/memcards/Mcd001.ps2");
+    fs::create_dir_all(card.parent().unwrap()).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(&card, vec![0xFFu8; 8 * 1024 * 1024 + 256 * 1024]).unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    ps2_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("ps2@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = ps2_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(upload.calls(), 0, "an unformatted card was uploaded");
+    assert!(
+        stderr.contains("PS2 memory-card superblock"),
+        "the refusal does not say the image is not a card:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("skipped_by_policy=1"),
+        "the skip is not counted:\n{stdout}"
+    );
+}

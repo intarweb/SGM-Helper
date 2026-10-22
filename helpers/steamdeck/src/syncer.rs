@@ -17,8 +17,8 @@ use crate::scanner::{
     dreamcast_skip_reason, encode_download_for_local_container, filename_stem,
     is_mame_nvram_component, is_n64_retroarch_bundle, mame_nvram_machine, md5_file,
     n64_controller_pak_entry_count, normalize_save_bytes_for_sync, normalize_save_for_sync,
-    saturn_skip_reason, sha1_file, sha256_bytes, sha256_file, sidecar_label, wii_skip_reason,
-    wii_title_code_from_path,
+    ps2_skip_reason, saturn_skip_reason, sha1_file, sha256_bytes, sha256_file, sidecar_label,
+    wii_skip_reason, wii_title_code_from_path,
 };
 use crate::sources::{EmulatorProfile, SourceKind, prepare_sources_for_sync};
 use crate::state::{
@@ -1965,6 +1965,11 @@ fn process_single_save(
             saturn_skip_reason(save_path, rom_entry.map(|entry| entry.path.as_path()))
         {
             eprintln!("Skipping Saturn save {}: {}", save_path.display(), reason);
+        } else if let Some(reason) =
+            ps2_skip_reason(save_path, rom_entry.map(|entry| entry.path.as_path()))
+        {
+            report.skipped_by_policy += 1;
+            eprintln!("Skipping PS2 save {}: {}", save_path.display(), reason);
         } else if let Some(reason) = wii_skip_reason(save_path) {
             eprintln!("Skipping Wii save {}: {}", save_path.display(), reason);
         } else if let Some(ext) = save_extension(save_path)

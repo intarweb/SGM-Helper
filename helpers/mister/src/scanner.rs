@@ -333,6 +333,34 @@ pub fn saturn_skip_reason(save_path: &Path, rom_path: Option<&Path>) -> Option<S
     }
 }
 
+/// A PCSX2 memory card is a PS2 filesystem image; a file that does not begin
+/// with the superblock is not a card at all. Reporting that is the difference
+/// between "this file is not a save" and "the size table is missing an entry",
+/// which is what the generic message sends an operator looking for.
+pub fn ps2_skip_reason(save_path: &Path, rom_path: Option<&Path>) -> Option<String> {
+    let ext = path_extension(save_path)?;
+    if !matches!(ext.as_str(), "ps2" | "bin") {
+        return None;
+    }
+
+    let save_size = save_path.metadata().ok()?.len();
+    let save_lower = save_path.to_string_lossy().to_ascii_lowercase();
+    let rom_lower = rom_path
+        .map(|path| path.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let combined = format!("{} {}", save_lower, rom_lower);
+    if !contains_any(&combined, &["pcsx2", "/ps2/", "\\ps2\\", "playstation 2"]) {
+        return None;
+    }
+    if validate_ps2_memory_card_image(save_path) {
+        return None;
+    }
+    Some(format!(
+        "the {} byte image does not start with the PS2 memory-card superblock",
+        save_size
+    ))
+}
+
 pub fn dreamcast_skip_reason(save_path: &Path, rom_path: Option<&Path>) -> Option<String> {
     let ext = path_extension(save_path)?;
     if !matches!(ext.as_str(), "bin" | "vms" | "dci") {
