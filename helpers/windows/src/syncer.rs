@@ -1201,6 +1201,29 @@ fn cloud_target_extension(
     cloud_save: &CloudSaveSummary,
     runtime_profile: Option<&str>,
 ) -> Option<String> {
+    let profile_extension = profile_target_extension(cloud_save, runtime_profile);
+    // A sidecar must never land on a primary target: an `.rtc` mapped onto a
+    // `.srm` overwrites the real cartridge save with seconds of clock state.
+    // The cloud record carries no format field, so sidecar-ness comes from the
+    // filename it stored. Sidecar-to-sidecar is a container conversion the
+    // profile may legitimately ask for (a MiSTer controller pak writes `.cpk`
+    // for a record stored as `.mpk`), so only a sidecar heading for a
+    // non-sidecar target is redirected.
+    if let (Some(ext), Some(target)) = (
+        extension_from_filename(&cloud_save.filename),
+        profile_extension.as_deref(),
+    ) && crate::scanner::is_sidecar(&ext)
+        && !crate::scanner::is_sidecar(target)
+    {
+        return Some(ext);
+    }
+    profile_extension
+}
+
+fn profile_target_extension(
+    cloud_save: &CloudSaveSummary,
+    runtime_profile: Option<&str>,
+) -> Option<String> {
     if let Some(runtime_profile) = runtime_profile
         && let Some(profile) = cloud_save.download_profiles.iter().find(|profile| {
             profile.id.eq_ignore_ascii_case(runtime_profile)
@@ -2811,6 +2834,41 @@ fn process_single_save(
             && existing.is_file()
             && existing.len() != local_bytes.len() as u64
         {
+            // Padding is not a difference: the same save written by a core that
+            // pads and one that does not must not deadlock two devices. Read the
+            // file only on the mismatch, and only to compare the bytes that
+            // carry the save.
+            if let Ok(on_disk) = std::fs::read(&target_save_path) {
+                let padded = if on_disk.len() >= local_bytes.len() {
+                    same_save_with_padding(&local_bytes, &on_disk)
+                } else {
+                    same_save_with_padding(&on_disk, &local_bytes)
+                };
+                if padded {
+                    report.in_sync += 1;
+                    eprintln!(
+                        "Keeping {} ({} bytes): record {} is the same save at {} bytes, the difference is 0xFF padding",
+                        target_save_path.display(),
+                        on_disk.len(),
+                        save_id,
+                        local_bytes.len()
+                    );
+                    return Ok(Some(processed_entry(
+                        state_key.clone(),
+                        synced_entry(
+                            local_sha,
+                            Some(active_rom_sha1.clone()),
+                            latest.version,
+                            Some(&system_slug),
+                            Some(normalized_save.local_container),
+                            Some(normalized_save.adapter_profile),
+                            Some(source_kind),
+                            Some(source_name),
+                            Some(&effective_slot_name),
+                        ),
+                    )));
+                }
+            }
             // A component's size is a property of its device. A payload of a
             // different size is a different component (or another machine's
             // save), and writing it would replace real data with the wrong
@@ -3719,6 +3777,20 @@ fn select_preferred_save_per_stem(
         .collect()
 }
 
+/// Whether one payload is the other's bytes with `0xFF` padding on the end.
+///
+/// A RetroArch device pads a cartridge save to whatever size its core was set up
+/// with -- a 32 KiB GBA save becomes 128 KiB, an 8 KiB Master System save
+/// becomes 64 KiB -- and fills the rest with `0xFF`. The bytes that carry the
+/// save are identical, so a size difference with padding on one side is not a
+/// conflict, and refusing it leaves the padded device unable to ever adopt the
+/// server's copy.
+fn same_save_with_padding(shorter: &[u8], longer: &[u8]) -> bool {
+    longer.len() >= shorter.len()
+        && longer.starts_with(shorter)
+        && longer[shorter.len()..].iter().all(|byte| *byte == 0xFF)
+}
+
 fn preferred_save_path(
     save_path: &Path,
     source_kind: &SourceKind,
@@ -4190,6 +4262,73 @@ mod tests {
             std::slice::from_ref(&root),
             true
         ));
+    }
+
+    // GBC-RTC clobber: a profile that targets the primary extension must not
+    // pull a sidecar onto it. An 8-byte clock state written over a 32 KiB
+    // cartridge save destroys the save.
+    #[test]
+    fn a_sidecar_restores_to_its_own_extension() {
+        let save = cloud_save(
+            "Pokemon - Crystal Version (USA, Europe) (Rev 1).rtc",
+            "Pokemon - Crystal Version",
+            "gameboy",
+            "gameboy/retroarch-gambatte",
+            ".srm",
+        );
+        assert_eq!(
+            cloud_target_extension(&save, Some("gameboy/retroarch-gambatte")).as_deref(),
+            Some("rtc"),
+            "the sidecar was mapped onto the profile's primary extension"
+        );
+    }
+
+    #[test]
+    fn a_primary_still_takes_the_profiles_extension() {
+        let save = cloud_save(
+            "Pokemon - Crystal Version (USA, Europe) (Rev 1).srm",
+            "Pokemon - Crystal Version",
+            "gameboy",
+            "gameboy/retroarch-gambatte",
+            ".srm",
+        );
+        assert_eq!(
+            cloud_target_extension(&save, Some("gameboy/retroarch-gambatte")).as_deref(),
+            Some("srm")
+        );
+    }
+
+    // A RetroArch device pads a cartridge save with 0xFF; another core writes it
+    // at its true length. Same save, and the size difference must not deadlock
+    // the two devices.
+    #[test]
+    fn a_padded_payload_is_the_same_save() {
+        let mut shorter = vec![0xA5u8; 32768];
+        shorter[0] = 0x01;
+        let mut longer = shorter.clone();
+        longer.extend(vec![0xFFu8; 98304]);
+
+        assert!(same_save_with_padding(&shorter, &longer));
+        assert!(same_save_with_padding(&longer[..shorter.len()], &longer));
+    }
+
+    #[test]
+    fn a_difference_inside_the_save_is_not_padding() {
+        let shorter = vec![0xA5u8; 32768];
+        let mut longer = shorter.clone();
+        longer.extend(vec![0xFFu8; 98304]);
+        longer[100] = 0x00;
+
+        assert!(!same_save_with_padding(&shorter, &longer));
+    }
+
+    #[test]
+    fn padding_must_be_0xff_to_count_as_padding() {
+        let shorter = vec![0xA5u8; 16];
+        let mut longer = shorter.clone();
+        longer.extend(vec![0x00u8; 16]);
+
+        assert!(!same_save_with_padding(&shorter, &longer));
     }
 
     fn cloud_save(
