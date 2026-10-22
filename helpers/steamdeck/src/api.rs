@@ -137,6 +137,24 @@ pub struct RomGame {
     pub system: Option<serde_json::Value>,
 }
 
+/// An error from the upload request. The caller uses the type to tell a refusal
+/// of the save from a failure of a lookup or a conflict check; the text is for
+/// the operator and may be reworded without changing that decision.
+#[derive(Debug)]
+pub struct UploadRequestError(pub anyhow::Error);
+
+impl std::fmt::Display for UploadRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "POST /saves (multipart upload)")
+    }
+}
+
+impl std::error::Error for UploadRequestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct UploadSaveResponse {
     pub save: Option<UploadedSave>,
@@ -722,7 +740,8 @@ impl ApiClient {
         // Name the request in the error: a refusal's message otherwise arrives
         // without saying which call produced it, which is how a dry-run report
         // of two uploads could not be matched to a branch.
-        parse_json_response(response).with_context(|| "POST /saves (multipart upload)")
+        let saved: UploadSaveResponse = parse_json_response(response).map_err(UploadRequestError)?;
+        Ok(saved)
     }
 
     pub fn list_saves(
