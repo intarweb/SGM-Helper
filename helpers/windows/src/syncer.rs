@@ -36,6 +36,18 @@ pub struct SyncOptions {
     pub default_source_kind: SourceKind,
 }
 
+/// Every upload names the file it took and the record it produced. Without
+/// this, one file re-uploaded every pass cannot be told from a healthy run:
+/// the only per-file lines were refusals.
+fn log_upload(path: &Path, id: Option<&str>, bytes: usize) {
+    eprintln!(
+        "Uploaded {} (record {}, {} bytes)",
+        path.display(),
+        id.unwrap_or("-"),
+        bytes
+    );
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SyncReport {
     pub scanned: usize,
@@ -431,9 +443,18 @@ pub fn run_sync(
                     }
                 }
                 Err(err) => {
-                    report.errors += 1;
-                    eprintln!("Sync error for {}: {}", save_path.display(), err);
+                    // A refusal of this save is the save's outcome, not a failed pass.
+                    // Counting it as an error made a first run report errors=3 and, in
+                    // the service, look like a fault to retry. It is held for as long
+                    // as the file is unchanged.
                     if let Some(status) = permanent_rejection_status(&err) {
+                        report.rejected_permanent += 1;
+                        eprintln!(
+                            "Refused {} (status {}): {}",
+                            save_path.display(),
+                            status,
+                            err
+                        );
                         let sha = sha256_file(&save_path).unwrap_or_default();
                         sync_state.terminal_rejections.insert(
                             save_key.clone(),
@@ -444,6 +465,9 @@ pub fn run_sync(
                                 recorded_at: now_rfc3339(),
                             },
                         );
+                    } else {
+                        report.errors += 1;
+                        eprintln!("Sync error for {}: {}", save_path.display(), err);
                     }
                 }
             }
@@ -1702,8 +1726,12 @@ fn process_single_save(
             &runtime_target,
             verbose,
         );
+        let upload_id: Option<String>;
         let upload_version = match upload_result {
-            Ok(Some(save)) => save.version,
+            Ok(Some(save)) => {
+                upload_id = save.id.clone();
+                save.version
+            }
             Ok(None) => {
                 // 2xx with no `save`: the server accepted the request but stored
                 // nothing.  Counting this as uploaded is how a client reports a
@@ -1729,6 +1757,11 @@ fn process_single_save(
             }
         };
 
+        log_upload(
+            save_path,
+            upload_id.as_deref(),
+            normalized_save.canonical_bytes.len(),
+        );
         report.uploaded += 1;
         return Ok(Some(processed_entry(
             state_key.clone(),
@@ -1783,8 +1816,12 @@ fn process_single_save(
             &runtime_target,
             verbose,
         );
+        let upload_id: Option<String>;
         let upload_version = match upload_result {
-            Ok(Some(save)) => save.version,
+            Ok(Some(save)) => {
+                upload_id = save.id.clone();
+                save.version
+            }
             Ok(None) => {
                 // 2xx with no `save`: the server accepted the request but stored
                 // nothing.  Counting this as uploaded is how a client reports a
@@ -1809,6 +1846,11 @@ fn process_single_save(
                 return Err(err);
             }
         };
+        log_upload(
+            save_path,
+            upload_id.as_deref(),
+            normalized_save.canonical_bytes.len(),
+        );
         report.uploaded += 1;
         return Ok(Some(processed_entry(
             state_key.clone(),
@@ -1892,6 +1934,7 @@ fn process_single_save(
                 arcade_machine.as_deref(),
                 Some(&runtime_target),
             )?;
+            log_upload(save_path, None, normalized_save.canonical_bytes.len());
             report.uploaded += 1;
             return Ok(Some(processed_entry(
                 state_key.clone(),
@@ -1950,6 +1993,7 @@ fn process_single_save(
                     arcade_machine.as_deref(),
                     Some(&runtime_target),
                 )?;
+                log_upload(save_path, None, normalized_save.canonical_bytes.len());
                 report.uploaded += 1;
                 return Ok(Some(processed_entry(
                     state_key.clone(),
@@ -2043,6 +2087,7 @@ fn process_single_save(
                     arcade_machine.as_deref(),
                     Some(&runtime_target),
                 )?;
+                log_upload(save_path, None, normalized_save.canonical_bytes.len());
                 report.uploaded += 1;
                 return Ok(Some(processed_entry(
                     state_key.clone(),

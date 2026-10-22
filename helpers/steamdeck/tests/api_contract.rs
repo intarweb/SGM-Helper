@@ -1873,13 +1873,18 @@ fn a_long_blank_refusal_is_still_permanent() {
         .assert()
         .success();
 
-    Command::cargo_bin("sgm-steamdeck-helper")
+    let first = Command::cargo_bin("sgm-steamdeck-helper")
         .unwrap()
         .arg("--config")
         .arg(&config)
         .arg("sync")
-        .assert()
-        .success();
+        .output()
+        .unwrap();
+    let first_out = String::from_utf8_lossy(&first.stdout);
+    assert!(
+        first_out.contains("rejected_permanent=1") && first_out.contains("errors=0"),
+        "the refusal was counted as a failed pass on its first sighting: {first_out}"
+    );
     let first_calls = upload.calls();
 
     let output = Command::cargo_bin("sgm-steamdeck-helper")
@@ -1972,13 +1977,18 @@ fn a_blank_refusal_from_a_retroarch_source_is_held_permanently() {
         .arg("pw")
         .assert()
         .success();
-    Command::cargo_bin("sgm-steamdeck-helper")
+    let first = Command::cargo_bin("sgm-steamdeck-helper")
         .unwrap()
         .arg("--config")
         .arg(&config_path)
         .arg("sync")
-        .assert()
-        .success();
+        .output()
+        .unwrap();
+    let first_out = String::from_utf8_lossy(&first.stdout);
+    assert!(
+        first_out.contains("rejected_permanent=1") && first_out.contains("errors=0"),
+        "the refusal was counted as a failed pass on its first sighting: {first_out}"
+    );
 
     let state = fs::read_to_string(state_dir.join("sync_state.json")).unwrap();
     assert!(
