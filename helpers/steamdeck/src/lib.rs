@@ -293,13 +293,14 @@ fn dispatch(cli: Cli, loaded: LoadedConfig) -> Result<()> {
             apply_scan,
             slot_name,
         } => {
-            let mut cfg = loaded.config.clone();
-            if let Some(value) = force_upload {
-                cfg.force_upload = value;
-            }
-            if let Some(value) = dry_run {
-                cfg.dry_run = value;
-            }
+            let cfg = loaded.config.clone();
+            // `--dry-run` and `--force-upload` on the command line are this
+            // run's setting, not the device's configuration. The helper reports
+            // its configuration to the server, which stores it and hands it
+            // back as policy, so writing a one-off into that report turns a
+            // rehearsal into a permanent setting.
+            let run_force_upload = force_upload.unwrap_or(cfg.force_upload);
+            let run_dry_run = dry_run.unwrap_or(cfg.dry_run);
 
             print_steamdeck_autodetect_note_if_needed(&cfg, cli.quiet)?;
 
@@ -310,8 +311,8 @@ fn dispatch(cli: Cli, loaded: LoadedConfig) -> Result<()> {
                 &cfg,
                 auth.as_ref(),
                 &SyncOptions {
-                    force_upload: cfg.force_upload,
-                    dry_run: cfg.dry_run,
+                    force_upload: run_force_upload,
+                    dry_run: run_dry_run,
                     scan,
                     deep_scan,
                     apply_scan,
@@ -391,12 +392,9 @@ fn dispatch(cli: Cli, loaded: LoadedConfig) -> Result<()> {
             if let Some(value) = watch_interval {
                 cfg.watch_interval = value;
             }
-            if let Some(value) = force_upload {
-                cfg.force_upload = value;
-            }
-            if let Some(value) = dry_run {
-                cfg.dry_run = value;
-            }
+            // As above: see the Sync arm.
+            let run_force_upload = force_upload.unwrap_or(cfg.force_upload);
+            let run_dry_run = dry_run.unwrap_or(cfg.dry_run);
 
             print_steamdeck_autodetect_note_if_needed(&cfg, cli.quiet)?;
 
@@ -408,8 +406,8 @@ fn dispatch(cli: Cli, loaded: LoadedConfig) -> Result<()> {
                 auth.as_ref(),
                 WatchOptions {
                     interval_secs: cfg.watch_interval,
-                    force_upload: cfg.force_upload,
-                    dry_run: cfg.dry_run,
+                    force_upload: run_force_upload,
+                    dry_run: run_dry_run,
                     scan,
                     deep_scan,
                     apply_scan,

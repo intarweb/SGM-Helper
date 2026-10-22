@@ -962,12 +962,17 @@ fn restore_single_cloud_save(
         return Ok(());
     }
 
-    let native_target_path = cloud_restore_native_target_path(
+    let native_target_path = restore_target_without_overwriting_another_system(
+        cloud_restore_native_target_path(
+            &provisional_path,
+            source_kind,
+            &effective_profile,
+            &system_slug,
+            cloud_save,
+        ),
         &provisional_path,
-        source_kind,
-        &effective_profile,
         &system_slug,
-        cloud_save,
+        sync_entries,
     );
     if native_target_path != provisional_path
         && existing_local_save_is_valid(&native_target_path, &system_slug)
@@ -1029,13 +1034,18 @@ fn restore_single_cloud_save(
     let local_container =
         local_container_for_cloud_download(&system_slug, &provisional_path, &downloaded_bytes)?;
     let adapter_profile = default_adapter_profile_for_container(local_container);
-    let target_path = preferred_save_path(
+    let target_path = restore_target_without_overwriting_another_system(
+        preferred_save_path(
+            &provisional_path,
+            source_kind,
+            &effective_profile,
+            Some(&system_slug),
+            local_container,
+            Some(downloaded_bytes.len() as u64),
+        ),
         &provisional_path,
-        source_kind,
-        &effective_profile,
-        Some(&system_slug),
-        local_container,
-        Some(downloaded_bytes.len() as u64),
+        &system_slug,
+        sync_entries,
     );
 
     if existing_local_save_is_valid(&target_path, &system_slug) {
@@ -1409,9 +1419,42 @@ fn existing_cloud_target_for_alias(
             .filter(move |alias| *alias != default_dir),
     );
     for alias in candidates {
-        let candidate = root.join(alias).join(filename);
+        let directory = root.join(alias);
+        let candidate = directory.join(filename);
         if candidate.exists() {
             return Some(candidate);
+        }
+        // The profile's extension is the server's idea of the name, and the
+        // core may have written another one for the same save: a MiSTer pads a
+        // Master System save to 64 KiB and keeps it as `.sav`, while the Deck
+        // keeps the cart's 8188-byte `.srm`. A same-stem file counts only when
+        // the state records this helper syncing it for this system -- the same
+        // gate the write-back uses, so a sibling system's file is never written
+        // over.
+        let mut matches = same_stem_known_saves(&directory, filename, system_slug, known_saves);
+        match matches.len() {
+            0 => {}
+            1 => {
+                let existing = matches.remove(0);
+                eprintln!(
+                    "Restoring into {}: it already holds this {} save under another extension",
+                    existing.display(),
+                    system_slug
+                );
+                return Some(existing);
+            }
+            _ => {
+                eprintln!(
+                    "More than one file in {} holds the {} stem: {}; using a new name instead",
+                    directory.display(),
+                    save_stem(filename),
+                    matches
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
         }
     }
 
@@ -1467,24 +1510,7 @@ fn existing_cloud_target_for_alias(
         // profile that disagrees with the core from silently defeating the
         // write-back; the state still decides which file is this system's, and
         // two known files on one stem is a guess this helper does not make.
-        let mut matches: Vec<PathBuf> = std::fs::read_dir(path)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .map(|entry| entry.path())
-                    .filter(|entry| entry.is_file())
-                    .filter(|entry| {
-                        entry
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .map(|name| same_save_stem(name, filename))
-                            .unwrap_or(false)
-                    })
-                    .filter(|entry| known_save_for_system(entry, system_slug, known_saves))
-                    .collect()
-            })
-            .unwrap_or_default();
-        matches.sort();
+        let matches = same_stem_known_saves(path, filename, system_slug, known_saves);
         match matches.len() {
             0 => {}
             1 => {
@@ -1532,6 +1558,60 @@ fn save_stem(filename: &str) -> &str {
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or(filename)
+}
+
+/// The profile's preferred extension is a name, not evidence: rewriting `.sav`
+/// to `.srm` lands on whatever file already carries that name. Only a file this
+/// helper synced for this system may be written blind; otherwise the record's
+/// own name is kept and the other file is left alone.
+fn restore_target_without_overwriting_another_system(
+    candidate: PathBuf,
+    provisional: &Path,
+    system_slug: &str,
+    known_saves: &HashMap<String, SyncedEntry>,
+) -> PathBuf {
+    if candidate != provisional
+        && candidate.exists()
+        && !known_save_for_system(&candidate, system_slug, known_saves)
+    {
+        eprintln!(
+            "Not restoring into {}: the profile's extension names a file this helper has not synced as {}",
+            candidate.display(),
+            system_slug
+        );
+        return provisional.to_path_buf();
+    }
+    candidate
+}
+
+/// Files in `directory` that share `filename`'s stem and that the state records
+/// as this system's. Sorted, so a caller that refuses on ambiguity names them in
+/// a stable order.
+fn same_stem_known_saves(
+    directory: &Path,
+    filename: &str,
+    system_slug: &str,
+    known_saves: &HashMap<String, SyncedEntry>,
+) -> Vec<PathBuf> {
+    let mut matches: Vec<PathBuf> = std::fs::read_dir(directory)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|entry| entry.is_file())
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| same_save_stem(name, filename))
+                        .unwrap_or(false)
+                })
+                .filter(|entry| known_save_for_system(entry, system_slug, known_saves))
+                .collect()
+        })
+        .unwrap_or_default();
+    matches.sort();
+    matches
 }
 
 fn same_save_stem(candidate: &str, reference: &str) -> bool {
@@ -2020,31 +2100,20 @@ fn process_single_save(
             .and_then(|value| value.rom.as_ref())
             .and_then(|value| value.md5.clone());
 
-        // The difference between the server knowing a ROM and inventing one:
-        // an unrecognised stem is answered with a game named "Unknown", no
-        // system, and a sha1 derived from the stem. That sha1 becomes the save's
-        // key, and it carries no system, so two games sharing a title on
-        // different systems can answer each other's lookups. Say which happened
-        // rather than leaving it to be inferred from a log later.
-        if let Some(rom) = lookup.as_ref().and_then(|value| value.rom.as_ref())
-            && rom.system_is_unresolved()
-        {
-            let name = rom
-                .game
-                .as_ref()
-                .and_then(|game| game.name.as_deref())
-                .unwrap_or("-");
-            if rom_sha1.is_some() {
-                eprintln!(
-                    "Warning: the server did not recognise {:?} -- it answered with game {:?} and no system, so this save is keyed on the sha1 it supplied, which no cartridge produced and which carries no system",
-                    rom_stem, name
-                );
-            } else if verbose {
-                eprintln!(
-                    "The server did not recognise {:?} -- it answered with game {:?} and no system, and supplied no sha1; the ROM is hashed locally",
-                    rom_stem, name
-                );
-            }
+        // The lookup endpoint derives its sha1 from the filename stem and never
+        // names a system, so "the record carries no system" says nothing about
+        // whether the game is known -- warning on it fired for every save and
+        // buried the cases that matter. What is worth naming is an answer with
+        // no game at all, which is a response this helper cannot use.
+        let lookup_game = lookup
+            .as_ref()
+            .and_then(|value| value.rom.as_ref())
+            .and_then(|rom| rom.game.as_ref());
+        if verbose && lookup.is_some() && lookup_game.is_none() {
+            eprintln!(
+                "The server returned no game for {:?}; the save is keyed on what this helper hashes itself",
+                rom_stem
+            );
         }
 
         if rom_sha1.is_none()

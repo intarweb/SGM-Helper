@@ -116,18 +116,6 @@ pub struct RomRecord {
     pub game: Option<RomGame>,
 }
 
-impl RomRecord {
-    /// The server answers an unrecognised stem with a live game record that
-    /// carries no system, and a sha1 derived from the stem rather than from a
-    /// cartridge. A save keyed on it is keyed on nothing.
-    pub fn system_is_unresolved(&self) -> bool {
-        match self.game.as_ref().and_then(|game| game.system.as_ref()) {
-            None => true,
-            Some(system) => system.is_null(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct RomGame {
     #[serde(default)]

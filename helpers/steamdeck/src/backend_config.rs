@@ -20,6 +20,19 @@ pub struct RuntimeConfigOverrides {
     pub dry_run: Option<bool>,
 }
 
+/// The global settings this pass sent to the server.
+///
+/// The server stores what a device reports and hands it back as "policy", so a
+/// value identical to the report is an echo, not a decision: applying it makes
+/// a one-off `--dry-run` permanent, and writing it into config.ini closes the
+/// loop. Only a value that differs from the report is treated as the server's
+/// own instruction.
+#[derive(Debug, Clone, Copy, Default)]
+struct ReportedGlobals {
+    force_upload: Option<bool>,
+    dry_run: Option<bool>,
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 struct BackendConfigSyncResponse {
@@ -79,6 +92,11 @@ struct BackendGlobalPolicy {
     pub dry_run: Option<bool>,
     #[serde(rename = "routePrefix", alias = "route_prefix", alias = "ROUTE_PREFIX")]
     pub route_prefix: Option<String>,
+    /// Whether the server set this itself, rather than handing back what the
+    /// device reported. RSM's global policy is derived from the device's own
+    /// config report, so without this marker a global setting is an echo.
+    #[serde(default, deserialize_with = "deserialize_optional_bool")]
+    pub managed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -169,7 +187,11 @@ pub fn sync_config_with_backend(
     let response: BackendConfigSyncResponse =
         serde_json::from_value(response).context("kan backend config sync response niet lezen")?;
 
-    let overrides = apply_backend_response(sources, &response, verbose);
+    let reported = ReportedGlobals {
+        force_upload: Some(config.force_upload),
+        dry_run: Some(config.dry_run),
+    };
+    let overrides = apply_backend_response(sources, &response, reported, verbose);
     write_backend_policy_to_config(config, &response, verbose)?;
     if verbose && response.accepted {
         eprintln!("Backend accepted helper config snapshot.");
@@ -603,11 +625,17 @@ fn merge_global_policy(
     if let Some(value) = policy.watch_interval {
         out.insert("WATCH_INTERVAL", Some(value.to_string()));
     }
-    if let Some(value) = policy.force_upload {
-        out.insert("FORCE_UPLOAD", Some(value.to_string()));
-    }
-    if let Some(value) = policy.dry_run {
-        out.insert("DRY_RUN", Some(value.to_string()));
+    // Only a managed policy is written into config.ini. Writing back the echo
+    // makes the report and the stored policy agree forever, which is the loop
+    // this whole rule exists to break.
+    let managed = policy.managed.unwrap_or(false);
+    if managed {
+        if let Some(value) = policy.force_upload {
+            out.insert("FORCE_UPLOAD", Some(value.to_string()));
+        }
+        if let Some(value) = policy.dry_run {
+            out.insert("DRY_RUN", Some(value.to_string()));
+        }
     }
     if let Some(value) = policy.route_prefix.as_ref() {
         out.insert("ROUTE_PREFIX", Some(value.clone()));
@@ -929,16 +957,18 @@ fn normalize_source_id(value: &str) -> String {
 fn apply_backend_response(
     sources: &mut [ResolvedSource],
     response: &BackendConfigSyncResponse,
+    reported: ReportedGlobals,
     verbose: bool,
 ) -> RuntimeConfigOverrides {
     let mut overrides = RuntimeConfigOverrides::default();
-    apply_global_policy(&mut overrides, response.global.as_ref());
+    apply_global_policy(&mut overrides, response.global.as_ref(), reported);
     apply_global_policy(
         &mut overrides,
         response
             .policy
             .as_ref()
             .and_then(|value| value.global.as_ref()),
+        reported,
     );
     apply_global_policy(
         &mut overrides,
@@ -946,6 +976,7 @@ fn apply_backend_response(
             .desired_config
             .as_ref()
             .and_then(|value| value.global.as_ref()),
+        reported,
     );
     apply_global_policy(
         &mut overrides,
@@ -953,6 +984,7 @@ fn apply_backend_response(
             .effective_config
             .as_ref()
             .and_then(|value| value.global.as_ref()),
+        reported,
     );
 
     for policy in source_policies(response) {
@@ -969,15 +1001,36 @@ fn apply_backend_response(
 fn apply_global_policy(
     overrides: &mut RuntimeConfigOverrides,
     policy: Option<&BackendGlobalPolicy>,
+    reported: ReportedGlobals,
 ) {
     let Some(policy) = policy else {
         return;
     };
-    if policy.force_upload.is_some() {
-        overrides.force_upload = policy.force_upload;
+    // The server's global policy is built from the device's own config report,
+    // so a value there is the device talking to itself unless the server says
+    // it managed the setting. Honouring the echo is what turned one `--dry-run`
+    // pass into a permanently dry device: the run reported true, the server
+    // stored it, handed it back, and the helper followed it on every later run.
+    let managed = policy.managed.unwrap_or(false);
+    if let Some(value) = policy.force_upload {
+        if managed {
+            overrides.force_upload = Some(value);
+        } else if Some(value) != reported.force_upload {
+            eprintln!(
+                "Ignoring forceUpload={} from the backend: not a managed policy, and it does not match this device's report",
+                value
+            );
+        }
     }
-    if policy.dry_run.is_some() {
-        overrides.dry_run = policy.dry_run;
+    if let Some(value) = policy.dry_run {
+        if managed {
+            overrides.dry_run = Some(value);
+        } else if Some(value) != reported.dry_run {
+            eprintln!(
+                "Ignoring dryRun={} from the backend: not a managed policy, and it does not match this device's report",
+                value
+            );
+        }
     }
 }
 
@@ -1131,7 +1184,8 @@ mod tests {
         }))
         .unwrap();
 
-        let overrides = apply_backend_response(&mut sources, &response, false);
+        let overrides =
+            apply_backend_response(&mut sources, &response, ReportedGlobals::default(), false);
         assert_eq!(overrides, RuntimeConfigOverrides::default());
         assert_eq!(sources[0].systems, vec!["snes"]);
         assert!(sources[0].create_missing_system_dirs);
@@ -1144,7 +1198,8 @@ mod tests {
         let response: BackendConfigSyncResponse = serde_json::from_value(serde_json::json!({
             "global": {
                 "forceUpload": true,
-                "dryRun": false
+                "dryRun": false,
+                "managed": true
             },
             "sources": [{
                 "sourceId": "mister_default",
@@ -1153,7 +1208,8 @@ mod tests {
         }))
         .unwrap();
 
-        let overrides = apply_backend_response(&mut sources, &response, false);
+        let overrides =
+            apply_backend_response(&mut sources, &response, ReportedGlobals::default(), false);
         assert_eq!(overrides.force_upload, Some(true));
         assert_eq!(overrides.dry_run, Some(false));
         assert!(sources[0].systems.is_empty());
@@ -1168,6 +1224,7 @@ mod tests {
                     "port": "80",
                     "forceUpload": "true",
                     "dryRun": "false",
+                    "managed": "true",
                     "watch": null,
                     "watchInterval": "45"
                 },
@@ -1184,7 +1241,8 @@ mod tests {
         }))
         .unwrap();
 
-        let overrides = apply_backend_response(&mut sources, &response, false);
+        let overrides =
+            apply_backend_response(&mut sources, &response, ReportedGlobals::default(), false);
         assert_eq!(overrides.force_upload, Some(true));
         assert_eq!(overrides.dry_run, Some(false));
         assert_eq!(
@@ -1211,7 +1269,8 @@ mod tests {
                 "global": {
                     "forceUpload": true,
                     "dryRun": false,
-                    "watchInterval": 15
+                    "watchInterval": 15,
+                    "managed": true
                 },
                 "sources": [{
                     "id": "super_nintendo_snes9x",

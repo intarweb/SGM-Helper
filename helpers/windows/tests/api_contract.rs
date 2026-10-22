@@ -161,6 +161,116 @@ fn login_with_password_uses_login_and_token_endpoints() {
     assert_eq!(auth["token"], "tok_password");
 }
 
+// One `--dry-run` pass used to turn a device permanently dry: the run reported
+// dry_run=true to the server, the server stored it and handed it back as
+// policy, and the helper both followed it and wrote DRY_RUN into config.ini.
+// The reported value is the device's configuration, not the run's flags, and an
+// unmanaged global policy is an echo -- never a decision.
+#[test]
+fn a_one_off_dry_run_does_not_make_the_next_run_dry() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_loop","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"loop@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"loop123","md5":"md5v","fileName":"wario.sav"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    // The server hands back dryRun=true on every request, exactly as it does
+    // when a previous one-off pass left it stored.
+    let _config_sync = server.mock(|when, then| {
+        when.method(POST).path("/helpers/config/sync");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"accepted":true,"global":{"dryRun":true}}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-loop","sha256":"sha-loop"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Nintendo/Game Boy")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("Nintendo/Game Boy/wario.sav"),
+        vec![0x00u8; 32768],
+    )
+    .unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("loop@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+
+    let rehearsal = Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .arg("--dry-run")
+        .output()
+        .unwrap();
+    let rehearsal_stdout = String::from_utf8_lossy(&rehearsal.stdout);
+    assert!(
+        rehearsal_stdout.contains("Sync complete (DRY RUN)"),
+        "the rehearsal was not a dry run: {rehearsal_stdout}"
+    );
+    assert_eq!(upload.calls(), 0, "the rehearsal uploaded");
+
+    let live = Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let live_stdout = String::from_utf8_lossy(&live.stdout);
+    assert!(
+        !live_stdout.contains("(DRY RUN)"),
+        "one rehearsal made the next run dry: {live_stdout}"
+    );
+    assert_eq!(
+        upload.calls(),
+        1,
+        "the next run did not upload: {live_stdout}"
+    );
+    let body = fs::read_to_string(&config).unwrap();
+    assert!(
+        !body.contains("DRY_RUN=\"true\""),
+        "the echoed policy was written into the config: {body}"
+    );
+}
+
 #[test]
 fn backend_forced_dry_run_marks_the_summary_and_uploads_nothing() {
     let server = MockServer::start();
@@ -194,7 +304,7 @@ fn backend_forced_dry_run_marks_the_summary_and_uploads_nothing() {
         when.method(POST).path("/helpers/config/sync");
         then.status(200)
             .header("content-type", "application/json")
-            .body(r#"{"accepted":true,"global":{"dryRun":true}}"#);
+            .body(r#"{"accepted":true,"global":{"dryRun":true,"managed":true}}"#);
     });
     let upload = server.mock(|when, then| {
         when.method(POST).path("/saves");
@@ -1175,7 +1285,7 @@ fn a_failed_config_fetch_keeps_the_last_backend_policy() {
         when.method(POST).path("/helpers/config/sync");
         then.status(200)
             .header("content-type", "application/json")
-            .body(r#"{"accepted":true,"global":{"dryRun":true}}"#);
+            .body(r#"{"accepted":true,"global":{"dryRun":true,"managed":true}}"#);
     });
     let upload = server.mock(|when, then| {
         when.method(POST).path("/saves");
@@ -1271,7 +1381,7 @@ fn an_unreadable_save_is_an_error_not_a_quiet_skip() {
         when.method(POST).path("/helpers/config/sync");
         then.status(200)
             .header("content-type", "application/json")
-            .body(r#"{"accepted":true,"global":{"dryRun":true}}"#);
+            .body(r#"{"accepted":true,"global":{"dryRun":true,"managed":true}}"#);
     });
 
     let tmp = tempfile::tempdir().unwrap();
@@ -3184,7 +3294,7 @@ fn an_unrecognised_title_is_named_as_a_placeholder_key() {
         when.method(GET).path("/rom/lookup");
         then.status(200)
             .header("content-type", "application/json")
-            .body(r#"{"count":1,"rom":{"fileName":"Unknown.srm","game":{"id":878081,"name":"Unknown","system":null},"sha1":"15f817b3db4e843f203c4eb7949486532715a08f","md5":"139d88db2fec53ba778c7d5d999c51a5"},"success":true}"#);
+            .body(r#"{"count":1,"rom":{"fileName":"Unknown.srm","sha1":"15f817b3db4e843f203c4eb7949486532715a08f","md5":"139d88db2fec53ba778c7d5d999c51a5"},"success":true}"#);
     });
     let _save_latest = server.mock(|when, then| {
         when.method(GET).path("/save/latest");
@@ -3225,6 +3335,7 @@ fn an_unrecognised_title_is_named_as_a_placeholder_key() {
         .arg("--config")
         .arg(&config)
         .arg("sync")
+        .arg("--verbose")
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -3237,12 +3348,8 @@ fn an_unrecognised_title_is_named_as_a_placeholder_key() {
         "the save was not uploaded:\n{stdout}\n{stderr}"
     );
     assert!(
-        stderr.contains("did not recognise"),
-        "the placeholder key was not named:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("no cartridge produced"),
-        "the warning does not say the key came from nowhere:\n{stderr}"
+        stderr.contains("returned no game"),
+        "an answer with no game was not named:\n{stderr}"
     );
 }
 
@@ -3312,7 +3419,7 @@ fn a_resolved_title_is_not_reported_as_a_placeholder() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
-        !stderr.contains("did not recognise"),
+        !stderr.contains("returned no game"),
         "a resolved record was reported as a placeholder:\n{stderr}"
     );
 }
@@ -4168,6 +4275,172 @@ fn an_unreadable_save_list_is_reported_not_swallowed() {
     );
 }
 
+// A MiSTer pads a Master System save to 64 KiB and keeps it as `.sav`; the Deck
+// keeps the cart's 8188-byte `.srm`. No single targetExtension serves both, so a
+// profile extension that names a file not on disk falls back to the same-stem
+// file the state records for this system -- the write-back's gate, not a name
+// guess.
+#[test]
+fn a_restore_lands_on_the_same_stem_under_the_system_directorys_extension() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_ms","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"ms@example.com"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":1,"limit":100,"offset":0,"saves":[{"id":"save-ps","filename":"Phantasy Star (USA, Europe).sav","displayTitle":"Phantasy Star","systemSlug":"master-system","sha256":"aaaaaaaaaaaaaaaa","version":4,"latestSizeBytes":65536}]}"#);
+    });
+    let download = server.mock(|when, then| {
+        when.method(GET).path("/saves/download");
+        then.status(200).body(vec![0xC7u8; 65536]);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/mastersystem")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let local = root.join("saves/mastersystem/Phantasy Star (USA, Europe).srm");
+    // Too short to be a card save, so the restore has a reason to write: what
+    // this asserts is where it writes, not whether it does.
+    fs::write(&local, vec![0x11u8; 8]).unwrap();
+    writeback_state(&state_dir, &local, "master-system");
+    let config = writeback_config_for(&tmp, &server, &root, &state_dir, "master-system");
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("ms@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(download.calls(), 1, "the restore was skipped:\n{stderr}");
+    assert_eq!(
+        fs::read(&local).unwrap(),
+        vec![0xC7u8; 65536],
+        "the save was not written back over the card save:\n{stderr}"
+    );
+    assert!(
+        !root
+            .join("saves/mastersystem/Phantasy Star (USA, Europe).sav")
+            .exists(),
+        "a second file was created beside the one the core writes:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("under another extension"),
+        "the restore does not say which file it used:\n{stderr}"
+    );
+}
+
+// The same shape one directory over, where the file is not this system's: a
+// profile extension that rewrites `.sav` to `.srm` must not land on a file the
+// state does not record for this system.
+#[test]
+fn a_restore_does_not_retarget_onto_a_file_belonging_to_another_system() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_msneg","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"msneg@example.com"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":1,"limit":100,"offset":0,"saves":[{"id":"save-ps","filename":"Phantasy Star (USA, Europe).sav","displayTitle":"Phantasy Star","systemSlug":"master-system","sha256":"bbbbbbbbbbbbbbbb","version":4,"latestSizeBytes":65536}]}"#);
+    });
+    let download = server.mock(|when, then| {
+        when.method(GET).path("/saves/download");
+        then.status(200).body(vec![0xC7u8; 65536]);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/mastersystem")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let other = root.join("saves/mastersystem/Phantasy Star (USA, Europe).srm");
+    let other_bytes = vec![0x11u8; 8];
+    fs::write(&other, &other_bytes).unwrap();
+    writeback_state(&state_dir, &other, "genesis");
+    let config = writeback_config_for(&tmp, &server, &root, &state_dir, "master-system");
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("msneg@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(download.calls(), 1, "the restore was skipped:\n{stderr}");
+    assert_eq!(
+        fs::read(&other).unwrap(),
+        other_bytes,
+        "another system's file was overwritten:\n{stderr}"
+    );
+    assert!(
+        root.join("saves/mastersystem/Phantasy Star (USA, Europe).sav")
+            .exists(),
+        "the restore did not fall back to the record's own name:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("has not synced as master-system"),
+        "the refusal does not say why:\n{stderr}"
+    );
+}
+
 // A same-named save in the write-back directory may belong to another
 // system; the helper must not overwrite it on a name match alone.
 #[test]
@@ -4249,16 +4522,27 @@ fn writeback_config(
     root: &std::path::Path,
     state_dir: &std::path::Path,
 ) -> std::path::PathBuf {
+    writeback_config_for(tmp, server, root, state_dir, "game-gear")
+}
+
+fn writeback_config_for(
+    tmp: &tempfile::TempDir,
+    server: &MockServer,
+    root: &std::path::Path,
+    state_dir: &std::path::Path,
+    systems: &str,
+) -> std::path::PathBuf {
     let config = tmp.path().join("config-writeback.ini");
     fs::write(
         &config,
         format!(
-            "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.retroarch]\nLABEL=\"RetroArch\"\nKIND=\"retroarch\"\nPROFILE=\"retroarch\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"game-gear\"\n",
+            "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.retroarch]\nLABEL=\"RetroArch\"\nKIND=\"retroarch\"\nPROFILE=\"retroarch\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"{}\"\n",
             server.port(),
             root.display(),
             state_dir.display(),
             root.join("saves").display(),
-            root.join("roms").display()
+            root.join("roms").display(),
+            systems
         ),
     )
     .unwrap();
