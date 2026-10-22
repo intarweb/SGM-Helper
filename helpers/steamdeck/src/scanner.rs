@@ -787,6 +787,13 @@ fn classify_core(
         }
     }
 
+    // Hints are tried in order and the first plausible one wins, so a name that
+    // contains another name has to be claimed before the shorter one:
+    // `neogeocd` starts with `neogeo`, and `neogeo` is the cartridge system, so
+    // the Neo Geo CD hint is above the NeoGeo one. The hazard also runs the other
+    // way -- a ROM whose path names a system its save directory denies (a Game
+    // Gear save under `saves/genesis/`) -- which is why the ROM path is
+    // consulted above this list rather than after it.
     // 3DO and Jaguar saves are told apart by the directory their emulator
     // writes, never by their size alone: 32 KiB and 128 B are ordinary sizes
     // for other systems too. The needles are path components or delimited
