@@ -17,6 +17,10 @@ const SAVE_EXTENSIONS: &[&str] = &[
     // Neo Geo Pocket writes its SRAM as `.flash`; without the extension the
     // file is not discovered at all on a case-sensitive filesystem.
     "flash", "ngf",
+    // Saturn cartridge backup RAM and the SMPC clock state. `.bkr` was listed
+    // for the internal backup RAM and these two were not, so a cartridge save
+    // with data was never walked and never mentioned.
+    "bcr", "smpc",
 ];
 
 const MAX_SAVE_BYTES: u64 = 512 * 1024 * 1024;
@@ -430,7 +434,7 @@ pub fn infer_supported_console_slug(save_path: &Path, rom_path: Option<&Path>) -
 
 pub fn saturn_skip_reason(save_path: &Path, rom_path: Option<&Path>) -> Option<String> {
     let ext = path_extension(save_path)?;
-    if !matches!(ext.as_str(), "sav" | "srm" | "ram" | "bkr") {
+    if !matches!(ext.as_str(), "sav" | "srm" | "ram" | "bkr" | "bcr") {
         return None;
     }
 
@@ -1362,8 +1366,10 @@ fn path_extension(path: &Path) -> Option<String> {
 ///   rtc — GB/GBC real-time clock (Pokemon Crystal/Gold/Silver, Harvest Moon).
 ///   mpk / cpk — N64 Controller-Pak / mempak (separate from the .eep/.fla/.sra
 ///               battery save).
-/// Extensible later (e.g. Dreamcast VMU); these three are the in-scope set.
-pub const SIDECAR_FORMATS: [&str; 3] = ["rtc", "mpk", "cpk"];
+/// The SMPC clock state travels the same way: a Saturn directory holds it beside
+/// the save, and it is never a record of its own. Extensible later (e.g.
+/// Dreamcast VMU); these four are the in-scope set.
+pub const SIDECAR_FORMATS: [&str; 4] = ["rtc", "mpk", "cpk", "smpc"];
 
 /// Whether a bare lowercased extension is a sidecar format.
 pub fn is_sidecar(ext: &str) -> bool {
@@ -1761,7 +1767,7 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
         "master-system" | "game-gear" | "sega-cd" | "sega-32x" => {
             matches!(ext, "sav" | "srm" | "ram")
         }
-        "saturn" => matches!(ext, "sav" | "srm" | "ram" | "bkr"),
+        "saturn" => matches!(ext, "sav" | "srm" | "ram" | "bkr" | "bcr"),
         "dreamcast" => matches!(ext, "bin" | "vms" | "dci"),
         "neogeo" => matches!(ext, "sav" | "srm" | "ram"),
         // The Neo Geo Pocket emulator writes a 512-byte save area with a
@@ -3500,6 +3506,48 @@ mod tests {
                 "/vault/roms/nintendones/Tecmo Super Bowl (USA).zip"
             )),
             "nintendones?"
+        );
+    }
+
+    // `.bkr` (internal backup RAM) was listed and `.bcr` (cartridge backup RAM)
+    // was not, so a cartridge save with data was never walked and never named.
+    #[test]
+    fn a_saturn_cartridge_backup_is_discovered_and_classified() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("saves/saturn");
+        fs::create_dir_all(&dir).unwrap();
+        let bcr = dir.join("3D Baseball (USA).bcr");
+        let smpc = dir.join("3D Baseball (USA).smpc");
+        fs::write(&bcr, vec![0xA5u8; SATURN_CARTRIDGE_RAW_SIZE]).unwrap();
+        fs::write(&smpc, vec![0xA5u8; 12]).unwrap();
+
+        let found = discover_save_files(&[tmp.path().join("saves")], true).unwrap();
+        assert!(
+            found.contains(&bcr),
+            "a cartridge backup was not discovered"
+        );
+        assert!(found.contains(&smpc), "the SMPC state was not discovered");
+        assert!(
+            is_plausible_save_for_system("bcr", SATURN_CARTRIDGE_RAW_SIZE as u64, "saturn"),
+            "a cartridge-sized .bcr is not plausible for saturn"
+        );
+    }
+
+    #[test]
+    fn the_smpc_state_travels_with_its_save() {
+        assert!(is_sidecar("smpc"));
+    }
+
+    #[test]
+    fn a_malformed_saturn_cartridge_save_is_named() {
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp.path().join("saves/saturn/3D Baseball (USA).bcr");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::write(&save, b"this is not a backup ram volume").unwrap();
+
+        assert!(
+            saturn_skip_reason(&save, None).is_some(),
+            "a malformed cartridge save was skipped without a reason"
         );
     }
 

@@ -2628,7 +2628,10 @@ fn process_single_save(
     // The RTC sidecar carries a clock, not a save. Stored alone it becomes a
     // record that re-uploads and re-downloads every pass, and written to a
     // sibling name it destroys the save beside it.
-    if save_extension(save_path).as_deref() == Some("rtc") {
+    if matches!(
+        save_extension(save_path).as_deref(),
+        Some("rtc") | Some("smpc")
+    ) {
         report.skipped_by_policy += 1;
         eprintln!(
             "Skipping {}: the RTC sidecar travels with its save, not as its own record",
