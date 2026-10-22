@@ -5036,6 +5036,99 @@ fn an_n64_bundle_directory_gains_no_component_file() {
     );
 }
 
+// The same title on two systems in the ROM roots must not decide a save's
+// system by directory-walk order. A NES save was classified genesis because the
+// walk reached the Mega Drive ROM first, and the server refused the profile.
+#[test]
+fn a_save_whose_stem_is_in_two_systems_uses_its_own_directory() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_amb","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"amb@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"nrom","md5":"nmd5","fileName":"Tecmo Super Bowl (USA).nes","game":{"id":1,"name":"Tecmo Super Bowl","system":{"id":2,"name":"NES"}}},"success":true}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":0,"limit":100,"offset":0,"saves":[]}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-amb","sha256":"sha-amb"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/nes")).unwrap();
+    fs::create_dir_all(root.join("roms/MegaDrive")).unwrap();
+    fs::create_dir_all(root.join("roms/Nintendo NES")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("saves/nes/Tecmo Super Bowl (USA).srm"),
+        vec![0xA5u8; 8192],
+    )
+    .unwrap();
+    fs::write(root.join("roms/MegaDrive/Tecmo Super Bowl (USA).zip"), b"x").unwrap();
+    fs::write(
+        root.join("roms/Nintendo NES/Tecmo Super Bowl (USA).zip"),
+        b"x",
+    )
+    .unwrap();
+    let config = writeback_config_for(&tmp, &server, &root, &state_dir, "nes");
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("amb@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .arg("--verbose")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(upload.calls(), 1, "the save was not uploaded:\n{stderr}");
+    assert!(
+        stderr.contains("Detected nes savegame"),
+        "the save was not classified as nes from its own directory:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Detected genesis savegame"),
+        "the ambiguous ROM path decided the system:\n{stderr}"
+    );
+}
+
 // A same-named save in the write-back directory may belong to another
 // system; the helper must not overwrite it on a name match alone.
 #[test]

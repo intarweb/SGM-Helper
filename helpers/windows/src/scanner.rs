@@ -100,6 +100,10 @@ const ROM_EXTENSIONS: &[&str] = &[
 pub struct RomIndexEntry {
     pub stem: String,
     pub path: PathBuf,
+    /// Set when this stem exists under more than one system in the ROM roots.
+    /// The path is then one candidate among several, not the answer: a save's
+    /// own directory may name a system the ROM path contradicts.
+    pub ambiguous: bool,
 }
 
 /// The name the server knows a system by. A MiSTer core is called `tgfx16`
@@ -115,6 +119,39 @@ pub fn canonical_server_system_slug(slug: &str) -> String {
 
 pub fn discover_save_files(roots: &[PathBuf], recursive: bool) -> Result<Vec<PathBuf>> {
     discover_files_with_extensions(roots, SAVE_EXTENSIONS, recursive)
+}
+
+/// The system a ROM's own path names, if it names one.
+/// A name for the system a ROM path belongs to, good enough to tell two of them
+/// apart: the known slug when the path names one, otherwise its own directory
+/// name. Two ROMs of one stem under different names are ambiguous whatever the
+/// table knows, which is the case a NES ROM beside a Mega Drive ROM makes.
+fn rom_system_token(path: &Path) -> String {
+    if let Some(slug) = system_for_rom_path(path) {
+        return slug.to_string();
+    }
+    path.parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            name.chars()
+                .filter(|ch| ch.is_ascii_alphanumeric())
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .filter(|token| !token.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn system_for_rom_path(path: &Path) -> Option<&'static str> {
+    if let Some(slug) = path_extension(path).and_then(system_slug_from_rom_extension) {
+        return Some(slug);
+    }
+    let lower = path.to_string_lossy().to_ascii_lowercase();
+    ROM_PATH_SYSTEM_HINTS
+        .iter()
+        .find(|(_, needles)| contains_any_needle(&lower, needles))
+        .map(|(slug, _)| *slug)
 }
 
 pub fn discover_rom_index(
@@ -147,14 +184,29 @@ pub fn discover_rom_index(
         per_root.push(files);
     }
     let files: Vec<PathBuf> = per_root.into_iter().flatten().collect();
-    let mut index = HashMap::new();
+    let mut index: HashMap<String, RomIndexEntry> = HashMap::new();
     for path in files {
         let stem = filename_stem(&path);
         if stem == "Unknown" {
             continue;
         }
         let key = stem.to_ascii_lowercase();
-        index.entry(key).or_insert(RomIndexEntry { stem, path });
+        match index.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let held = rom_system_token(&entry.get().path);
+                let found = rom_system_token(&path);
+                if held != found {
+                    entry.get_mut().ambiguous = true;
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(RomIndexEntry {
+                    stem,
+                    path,
+                    ambiguous: false,
+                });
+            }
+        }
     }
     Ok(index)
 }
@@ -1506,6 +1558,23 @@ pub const SIDECAR_FORMATS: [&str; 3] = ["rtc", "mpk", "cpk"];
 /// Whether a bare lowercased extension is a sidecar format.
 pub fn is_sidecar(ext: &str) -> bool {
     SIDECAR_FORMATS.contains(&ext)
+}
+
+/// Why a file that carries a save extension was not classified, when the
+/// answer is a gate the classifier applies to every system rather than a
+/// missing system profile.
+///
+/// The generic "no system profile accepts it" was wrong for a plain-text file:
+/// the profile table was never consulted, because the content gate ran first.
+pub fn save_gate_rejection(path: &Path) -> Option<&'static str> {
+    let size = path.metadata().ok()?.len();
+    if !is_plausible_save_size(size) {
+        return Some("the size is not a plausible save size");
+    }
+    if looks_plain_text(path) {
+        return Some("the file reads as plain text, not as a save");
+    }
+    None
 }
 
 fn is_plausible_save_size(size: u64) -> bool {
@@ -3181,6 +3250,39 @@ mod tests {
     // genesis_plus_gx serves Genesis and Game Gear, so a Game Gear save lives
     // in `saves/genesis/`. The ROM's own path is the evidence, and it is local:
     // the server's lookup returns a stem hash and no system.
+    // The vault holds Tecmo Super Bowl on NES, SNES, Mega Drive and PlayStation.
+    // The index keeps one path per stem, so which system a save got depended on
+    // the order the walk reached the ROMs in: a NES save was classified genesis
+    // and refused as "belongs to genesis".
+    #[test]
+    fn a_stem_in_two_systems_is_ambiguous() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roms = tmp.path().join("roms");
+        fs::create_dir_all(roms.join("Sega Genesis")).unwrap();
+        fs::create_dir_all(roms.join("Nintendo NES")).unwrap();
+        fs::write(roms.join("Sega Genesis/Tecmo Super Bowl (USA).md"), b"x").unwrap();
+        fs::write(roms.join("Nintendo NES/Tecmo Super Bowl (USA).nes"), b"x").unwrap();
+
+        let index = discover_rom_index(&[roms], true).unwrap();
+        let entry = index.get("tecmo super bowl (usa)").unwrap();
+        assert!(
+            entry.ambiguous,
+            "a stem held by two systems was treated as an answer"
+        );
+    }
+
+    #[test]
+    fn a_stem_in_one_system_is_not_ambiguous() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roms = tmp.path().join("roms");
+        fs::create_dir_all(roms.join("Sega Genesis")).unwrap();
+        fs::write(roms.join("Sega Genesis/Sonic the Hedgehog (USA).md"), b"x").unwrap();
+
+        let index = discover_rom_index(&[roms], true).unwrap();
+        let entry = index.get("sonic the hedgehog (usa)").unwrap();
+        assert!(!entry.ambiguous);
+    }
+
     #[test]
     fn a_game_gear_rom_names_the_system_its_save_directory_does_not() {
         let tmp = tempfile::tempdir().unwrap();

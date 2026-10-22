@@ -334,9 +334,13 @@ impl Drop for SyncLock {
 /// default yields to it and says so. Two configured sources over one root is the
 /// operator's arrangement, so both stay and the overlap is reported.
 fn prefer_configured_sources(sources: Vec<ResolvedSource>) -> (Vec<ResolvedSource>, Vec<String>) {
+    // The helper writes "autoscan-default" and "autoscan-known" for the sources
+    // it creates; a device's auto-created default carries the latter, which the
+    // first cut of this rule did not match. "manual" and "legacy-migrated" are
+    // the operator's own, and a migrated source is not demoted by being old.
     fn is_auto_default(source: &ResolvedSource) -> bool {
         let origin = source.origin.to_ascii_lowercase();
-        origin == "auto" || origin == "default" || origin == "autoscan-default"
+        origin.starts_with("autoscan") || origin == "auto" || origin == "default"
     }
 
     let (defaults, configured): (Vec<ResolvedSource>, Vec<ResolvedSource>) =
@@ -2050,30 +2054,35 @@ fn process_single_save(
     let stem = filename_stem(save_path);
     let stem_key = stem.to_ascii_lowercase();
     let rom_entry = rom_index.get(&stem_key);
+    // A stem the index holds under more than one system says nothing about this
+    // save: the path is one candidate among several, and letting it decide is
+    // how a NES save was classified genesis because the walk reached the
+    // Mega Drive ROM first. The save's own directory gets the say instead.
+    let rom_hint = rom_entry
+        .filter(|entry| !entry.ambiguous)
+        .map(|entry| entry.path.as_path());
     let mut state_key = save_key.to_string();
-    let Some(classification) =
-        classify_supported_save(save_path, rom_entry.map(|entry| entry.path.as_path()))
-    else {
+    let Some(classification) = classify_supported_save(save_path, rom_hint) else {
         report.skipped += 1;
-        if let Some(reason) =
-            dreamcast_skip_reason(save_path, rom_entry.map(|entry| entry.path.as_path()))
-        {
+        if let Some(reason) = dreamcast_skip_reason(save_path, rom_hint) {
             eprintln!(
                 "Skipping Dreamcast save {}: {}",
                 save_path.display(),
                 reason
             );
-        } else if let Some(reason) =
-            saturn_skip_reason(save_path, rom_entry.map(|entry| entry.path.as_path()))
-        {
+        } else if let Some(reason) = saturn_skip_reason(save_path, rom_hint) {
             eprintln!("Skipping Saturn save {}: {}", save_path.display(), reason);
-        } else if let Some(reason) =
-            ps2_skip_reason(save_path, rom_entry.map(|entry| entry.path.as_path()))
-        {
+        } else if let Some(reason) = ps2_skip_reason(save_path, rom_hint) {
             report.skipped_by_policy += 1;
             eprintln!("Skipping PS2 save {}: {}", save_path.display(), reason);
         } else if let Some(reason) = wii_skip_reason(save_path) {
             eprintln!("Skipping Wii save {}: {}", save_path.display(), reason);
+        } else if rom_entry.map(|entry| entry.ambiguous).unwrap_or(false) {
+            report.skipped_by_policy += 1;
+            eprintln!(
+                "Skipping save {}: the ROM index holds this stem under more than one system and the save's own directory names none of them",
+                save_path.display()
+            );
         } else if let Some(ext) = save_extension(save_path)
             && crate::scanner::known_save_extensions().contains(ext.as_str())
         {
@@ -2082,8 +2091,10 @@ fn process_single_save(
             // Sega saves went missing; name it and count it.
             report.skipped_by_policy += 1;
             eprintln!(
-                "Skipping save {}: no system profile accepts a {} byte .{} file",
+                "Skipping save {}: {} ({} bytes, .{})",
                 save_path.display(),
+                crate::scanner::save_gate_rejection(save_path)
+                    .unwrap_or("no system profile accepts it"),
                 std::fs::metadata(save_path)
                     .map(|meta| meta.len())
                     .unwrap_or_default(),
@@ -3951,7 +3962,10 @@ fn select_preferred_save_per_stem(
 
     for save_path in save_files {
         let stem_key = save_selection_key(save_path);
-        let rom_path = rom_index.get(&stem_key).map(|entry| entry.path.as_path());
+        let rom_path = rom_index
+            .get(&stem_key)
+            .filter(|entry| !entry.ambiguous)
+            .map(|entry| entry.path.as_path());
         let Some(classification) = classify_supported_save(save_path, rom_path) else {
             continue;
         };
@@ -4588,7 +4602,7 @@ mod tests {
             SourceKind::SteamDeck,
             EmulatorProfile::Generic,
             "/home/deck/retrodeck/saves",
-            "autoscan-default",
+            "autoscan-known",
         );
 
         let (kept, notices) = prefer_configured_sources(vec![auto, configured]);
