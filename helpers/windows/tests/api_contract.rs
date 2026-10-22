@@ -4692,6 +4692,94 @@ fn a_cloud_save_already_held_is_named_under_verbose() {
 // writing one beside the bundle is how a device manufactured nine strays in one
 // pass and then refused its own restore ever after.
 #[test]
+fn an_n64_component_beside_the_bundle_is_not_a_save() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_n64_skip","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"n64@example.com"}}"#);
+    });
+    let rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(
+                r#"{"success":true,"count":1,"rom":{"sha1":"n64-sha","md5":null,"fileName":"GOLDENEYE.srm"}}"#,
+            );
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":0,"limit":100,"offset":0,"saves":[]}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-ge","sha256":"n64-sha"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/n64")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    // The device's shape: the bundle the core reads, plus a component left
+    // behind by an older restore. The server answers with the bundle, and the
+    // size guard refuses it over the component on every pass.
+    fs::write(root.join("saves/n64/GOLDENEYE.srm"), vec![0xC7u8; 296960]).unwrap();
+    fs::write(root.join("saves/n64/GOLDENEYE.eep"), vec![0xC7u8; 2048]).unwrap();
+    let config = writeback_config_for(&tmp, &server, &root, &state_dir, "n64");
+
+    Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("n64@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(config)
+        .arg("sync")
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&output.get_output().stderr);
+    assert!(
+        stderr.contains("a component beside the")
+            || stderr.contains("in favor of preferred") && stderr.contains("GOLDENEYE.srm"),
+        "the component went unnamed: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Refusing to write record"),
+        "the component still reached the size guard: {stderr}"
+    );
+    // The bundle is the save that goes up; the component is never uploaded.
+    let _ = &rom_lookup;
+    assert_eq!(upload.calls(), 1, "the bundle was not the file that synced");
+}
+
+#[test]
 fn an_n64_component_record_restores_as_the_bundle() {
     let server = MockServer::start();
     let _token = server.mock(|when, then| {

@@ -2265,6 +2265,15 @@ fn process_single_save(
 
     let effective_profile =
         effective_profile_for_save(source_kind, source_profile, &system_slug, save_path);
+    if n64_component_beside_bundle(save_path, &system_slug, &effective_profile) {
+        report.skipped += 1;
+        eprintln!(
+            "Skipping {}: a component beside the {} bundle is not this profile's save",
+            save_path.display(),
+            save_path.with_extension("srm").display()
+        );
+        return Ok(None);
+    }
     let effective_slot_name =
         resolve_slot_name_for_sync(&system_slug, save_path, &options.slot_name);
     // A save's identity is its content and its game, not the name the emulator
@@ -3176,6 +3185,28 @@ fn process_single_save(
 /// state can still name a component the core never reads (`.eep`, `.sra`,
 /// `.fla`, and the controller pak containers). Both restore paths ask this one
 /// function, so they cannot disagree about what the target is.
+/// Under a bundle profile the core reads one combined file per game, so a
+/// component beside it is a leftover of an older restore. The server's payload
+/// for that game arrives as the bundle, the size guard refuses it over the
+/// component, and the refusal repeats every pass while nothing uploads.
+fn n64_component_beside_bundle(
+    save_path: &Path,
+    system_slug: &str,
+    profile: &EmulatorProfile,
+) -> bool {
+    if !system_slug.eq_ignore_ascii_case("n64") || !matches!(profile, EmulatorProfile::RetroArch) {
+        return false;
+    }
+    let extension = save_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    if !matches!(extension.as_deref(), Some("eep" | "sra" | "fla")) {
+        return false;
+    }
+    save_path.with_extension("srm").is_file()
+}
+
 fn n64_bundle_target(
     system_slug: &str,
     runtime_profile: Option<&str>,
@@ -4093,23 +4124,44 @@ fn select_preferred_save_per_stem(
 
         let extension = save_extension(save_path);
         let save_size = save_path.metadata().ok().map(|meta| meta.len());
-        let score = preferred_extension_for_system(
+        // A bundle profile reads one combined file per game, so that file is the
+        // save and a component beside it is a leftover. Without this the native
+        // -component bonus ties with the bundle and the tie is decided by the
+        // order the directory was walked -- which is how a device keeps a
+        // component it will then refuse the bundle against forever.
+        let effective_profile = effective_profile_for_save(
             source_kind,
             source_profile,
             &classification.system_slug,
-            save_size,
-        )
-        .map(|preferred| {
-            if (classification.system_slug == "n64"
-                && is_native_n64_extension(extension.as_deref()))
-                || extension.as_deref() == Some(preferred)
-            {
+            save_path,
+        );
+        let bundle_profile = classification.system_slug == "n64"
+            && matches!(effective_profile, EmulatorProfile::RetroArch);
+        let score = if bundle_profile {
+            if extension.as_deref() == Some("srm") {
                 2
             } else {
                 1
             }
-        })
-        .unwrap_or(1);
+        } else {
+            preferred_extension_for_system(
+                source_kind,
+                source_profile,
+                &classification.system_slug,
+                save_size,
+            )
+            .map(|preferred| {
+                if (classification.system_slug == "n64"
+                    && is_native_n64_extension(extension.as_deref()))
+                    || extension.as_deref() == Some(preferred)
+                {
+                    2
+                } else {
+                    1
+                }
+            })
+            .unwrap_or(1)
+        };
 
         match selected.get_mut(&stem_key) {
             Some((existing_path, existing_score)) => {
