@@ -2597,7 +2597,9 @@ fn process_single_save(
     {
         eprintln!(
             "Stem {:?} is held by {} in the ROM index; {} decided from its save directory",
-            stem, systems, system_slug
+            stem,
+            systems,
+            canonical_server_system_slug(&system_slug)
         );
     }
     if verbose && rom_entry_for_rom.is_none() {

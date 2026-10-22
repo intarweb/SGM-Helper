@@ -410,21 +410,38 @@ impl Source {
     }
 
     pub fn resolve(&self, binary_dir: &Path) -> ResolvedSource {
+        let save_roots: Vec<PathBuf> = self
+            .save_roots
+            .iter()
+            .map(|path| resolve_path(binary_dir, path))
+            .collect();
+        // A stored config can carry a ROM path that is the source's own save
+        // root -- an auto-created default used to write one. Indexing saves as
+        // ROMs is never right, and the config is not the operator's to edit by
+        // hand, so the root is dropped with a line instead.
+        let rom_roots: Vec<PathBuf> = self
+            .rom_roots
+            .iter()
+            .map(|path| resolve_path(binary_dir, path))
+            .filter(|root| {
+                if save_roots.iter().any(|save| save == root) {
+                    eprintln!(
+                        "Ignoring ROM root {}: it is the source's own save root",
+                        root.display()
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
         ResolvedSource {
             id: self.id.clone(),
             name: self.name.clone(),
             kind: self.kind.clone(),
             profile: self.profile.clone(),
-            save_roots: self
-                .save_roots
-                .iter()
-                .map(|path| resolve_path(binary_dir, path))
-                .collect(),
-            rom_roots: self
-                .rom_roots
-                .iter()
-                .map(|path| resolve_path(binary_dir, path))
-                .collect(),
+            save_roots,
+            rom_roots,
             recursive: self.recursive,
             systems: self.systems.clone(),
             create_missing_system_dirs: self.create_missing_system_dirs,
@@ -1538,6 +1555,27 @@ SAVE_PATH="/media/fat/saves"
         assert!(source.systems.contains(&"psx".to_string()));
         assert!(!source.systems.contains(&"wii".to_string()));
         assert!(!source.create_missing_system_dirs);
+    }
+
+    // An existing config can carry a ROM path that is the source's own save
+    // root; the derivation no longer writes one, and this is the half that
+    // heals the ones already on disk.
+    #[test]
+    fn a_rom_root_that_is_the_save_root_is_dropped() {
+        let source = Source::new(
+            "windows".to_string(),
+            SourceKind::Windows,
+            vec![PathBuf::from("./saves")],
+            vec![PathBuf::from("./saves")],
+            true,
+        );
+        let resolved = source.resolve(Path::new("/tmp"));
+        assert_eq!(resolved.save_roots.len(), 1);
+        assert!(
+            resolved.rom_roots.is_empty(),
+            "the save root was kept as a ROM root: {:?}",
+            resolved.rom_roots
+        );
     }
 
     #[test]

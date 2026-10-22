@@ -5394,6 +5394,89 @@ fn a_save_the_server_already_holds_says_so_every_run() {
     );
 }
 
+// A one-run CLI flag must never be written into the config: a --state-dir probe
+// put STATE_DIR into a live config, the probe directory was deleted, and the
+// service then crash-looped because its token had lived there.
+#[test]
+fn a_cli_state_dir_is_not_written_into_the_config() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_cli","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"cli@example.com"}}"#);
+    });
+    let _latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":0,"limit":100,"offset":0,"saves":[]}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    let probe_dir = tmp.path().join("probe");
+    fs::create_dir_all(root.join("saves/genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::create_dir_all(&probe_dir).unwrap();
+    let config = writeback_config_for(&tmp, &server, &root, &state_dir, "genesis");
+    let probe = probe_dir.to_string_lossy().to_string();
+    // The server echoes what the device reported, which is the CLI value.
+    let _config_sync = server.mock(|when, then| {
+        when.method(POST).path("/helpers/config/sync");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(format!(
+                r#"{{"accepted":true,"global":{{"stateDir":"{probe}","root":"{}"}}}}"#,
+                root.display()
+            ));
+    });
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("--state-dir")
+        .arg(&probe_dir)
+        .arg("login")
+        .arg("--email")
+        .arg("cli@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("--state-dir")
+        .arg(&probe_dir)
+        .arg("sync")
+        .output()
+        .unwrap();
+
+    let body = fs::read_to_string(&config).unwrap();
+    assert!(
+        body.contains(&format!("STATE_DIR=\"{}\"", state_dir.display())),
+        "the CLI state dir replaced the configured one: {body}"
+    );
+    assert!(
+        !body.contains(&format!("STATE_DIR=\"{}\"", probe_dir.display())),
+        "the CLI state dir was written into the config: {body}"
+    );
+}
+
 // A same-named save in the write-back directory may belong to another
 // system; the helper must not overwrite it on a name match alone.
 #[test]

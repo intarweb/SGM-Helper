@@ -27,10 +27,18 @@ pub struct RuntimeConfigOverrides {
 /// a one-off `--dry-run` permanent, and writing it into config.ini closes the
 /// loop. Only a value that differs from the report is treated as the server's
 /// own instruction.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct ReportedGlobals {
     force_upload: Option<bool>,
     dry_run: Option<bool>,
+    url: String,
+    port: u16,
+    email: String,
+    root: String,
+    state_dir: String,
+    watch: bool,
+    watch_interval: u64,
+    route_prefix: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -190,9 +198,17 @@ pub fn sync_config_with_backend(
     let reported = ReportedGlobals {
         force_upload: Some(config.force_upload),
         dry_run: Some(config.dry_run),
+        url: config.url.clone(),
+        port: config.port,
+        email: config.email.clone(),
+        root: config.root.to_string_lossy().to_string(),
+        state_dir: config.state_dir.to_string_lossy().to_string(),
+        watch: config.watch,
+        watch_interval: config.watch_interval,
+        route_prefix: config.route_prefix.clone(),
     };
-    let overrides = apply_backend_response(sources, &response, reported, verbose);
-    write_backend_policy_to_config(config, &response, verbose)?;
+    let overrides = apply_backend_response(sources, &response, &reported, verbose);
+    write_backend_policy_to_config(config, &response, &reported, verbose)?;
     if verbose && response.accepted {
         eprintln!("Backend accepted helper config snapshot.");
     }
@@ -503,14 +519,15 @@ fn split_policy_list(value: &str) -> Vec<String> {
 fn write_backend_policy_to_config(
     config: &AppConfig,
     response: &BackendConfigSyncResponse,
+    reported: &ReportedGlobals,
     verbose: bool,
 ) -> Result<()> {
-    if !response_has_writeback(response) {
+    if !response_has_writeback(response, reported) {
         return Ok(());
     }
 
     let existing = read_file_if_exists(&config.config_path)?;
-    let global_updates = collect_global_writeback(response);
+    let global_updates = collect_global_writeback(response, reported);
     let with_globals = apply_global_writeback_to_ini(&existing, &global_updates);
 
     // Render the result beside the live config first. The backend policy is
@@ -554,19 +571,23 @@ fn write_backend_policy_to_config(
     Ok(())
 }
 
-fn response_has_writeback(response: &BackendConfigSyncResponse) -> bool {
+fn response_has_writeback(
+    response: &BackendConfigSyncResponse,
+    reported: &ReportedGlobals,
+) -> bool {
     !source_policies(response).is_empty()
-        || collect_global_writeback(response)
+        || collect_global_writeback(response, reported)
             .values()
             .any(|value| value.is_some())
 }
 
 fn collect_global_writeback(
     response: &BackendConfigSyncResponse,
+    reported: &ReportedGlobals,
 ) -> BTreeMap<&'static str, Option<String>> {
     let mut out = BTreeMap::new();
     for policy in global_policies(response) {
-        merge_global_policy(&mut out, policy);
+        merge_global_policy(&mut out, policy, reported);
     }
     out
 }
@@ -603,26 +624,45 @@ fn global_policies(response: &BackendConfigSyncResponse) -> Vec<&BackendGlobalPo
 fn merge_global_policy(
     out: &mut BTreeMap<&'static str, Option<String>>,
     policy: &BackendGlobalPolicy,
+    reported: &ReportedGlobals,
 ) {
-    if let Some(value) = policy.url.as_ref() {
+    // A value the device itself reported comes back unchanged, and writing it
+    // establishes nothing: the report already carried it. That is how a one-run
+    // `--state-dir` reached config.ini and then crash-looped a service whose
+    // token lived in the probe directory.
+    if let Some(value) = policy.url.as_ref()
+        && value != &reported.url
+    {
         out.insert("URL", Some(value.clone()));
     }
-    if let Some(value) = policy.port {
+    if let Some(value) = policy.port
+        && value != reported.port
+    {
         out.insert("PORT", Some(value.to_string()));
     }
-    if let Some(value) = policy.email.as_ref() {
+    if let Some(value) = policy.email.as_ref()
+        && value != &reported.email
+    {
         out.insert("EMAIL", Some(value.clone()));
     }
-    if let Some(value) = policy.root.as_ref() {
+    if let Some(value) = policy.root.as_ref()
+        && value.to_string_lossy() != reported.root
+    {
         out.insert("ROOT", Some(value.to_string_lossy().to_string()));
     }
-    if let Some(value) = policy.state_dir.as_ref() {
+    if let Some(value) = policy.state_dir.as_ref()
+        && value.to_string_lossy() != reported.state_dir
+    {
         out.insert("STATE_DIR", Some(value.to_string_lossy().to_string()));
     }
-    if let Some(value) = policy.watch {
+    if let Some(value) = policy.watch
+        && value != reported.watch
+    {
         out.insert("WATCH", Some(value.to_string()));
     }
-    if let Some(value) = policy.watch_interval {
+    if let Some(value) = policy.watch_interval
+        && value != reported.watch_interval
+    {
         out.insert("WATCH_INTERVAL", Some(value.to_string()));
     }
     // Only a managed policy is written into config.ini. Writing back the echo
@@ -637,7 +677,9 @@ fn merge_global_policy(
             out.insert("DRY_RUN", Some(value.to_string()));
         }
     }
-    if let Some(value) = policy.route_prefix.as_ref() {
+    if let Some(value) = policy.route_prefix.as_ref()
+        && value != &reported.route_prefix
+    {
         out.insert("ROUTE_PREFIX", Some(value.clone()));
     }
 }
@@ -957,7 +999,7 @@ fn normalize_source_id(value: &str) -> String {
 fn apply_backend_response(
     sources: &mut [ResolvedSource],
     response: &BackendConfigSyncResponse,
-    reported: ReportedGlobals,
+    reported: &ReportedGlobals,
     verbose: bool,
 ) -> RuntimeConfigOverrides {
     let mut overrides = RuntimeConfigOverrides::default();
@@ -1001,7 +1043,7 @@ fn apply_backend_response(
 fn apply_global_policy(
     overrides: &mut RuntimeConfigOverrides,
     policy: Option<&BackendGlobalPolicy>,
-    reported: ReportedGlobals,
+    reported: &ReportedGlobals,
 ) {
     let Some(policy) = policy else {
         return;
@@ -1185,7 +1227,7 @@ mod tests {
         .unwrap();
 
         let overrides =
-            apply_backend_response(&mut sources, &response, ReportedGlobals::default(), false);
+            apply_backend_response(&mut sources, &response, &ReportedGlobals::default(), false);
         assert_eq!(overrides, RuntimeConfigOverrides::default());
         assert_eq!(sources[0].systems, vec!["snes"]);
         assert!(sources[0].create_missing_system_dirs);
@@ -1209,7 +1251,7 @@ mod tests {
         .unwrap();
 
         let overrides =
-            apply_backend_response(&mut sources, &response, ReportedGlobals::default(), false);
+            apply_backend_response(&mut sources, &response, &ReportedGlobals::default(), false);
         assert_eq!(overrides.force_upload, Some(true));
         assert_eq!(overrides.dry_run, Some(false));
         assert!(sources[0].systems.is_empty());
@@ -1242,7 +1284,7 @@ mod tests {
         .unwrap();
 
         let overrides =
-            apply_backend_response(&mut sources, &response, ReportedGlobals::default(), false);
+            apply_backend_response(&mut sources, &response, &ReportedGlobals::default(), false);
         assert_eq!(overrides.force_upload, Some(true));
         assert_eq!(overrides.dry_run, Some(false));
         assert_eq!(
@@ -1288,7 +1330,8 @@ mod tests {
         }))
         .unwrap();
 
-        write_backend_policy_to_config(&config, &response, false).unwrap();
+        write_backend_policy_to_config(&config, &response, &ReportedGlobals::default(), false)
+            .unwrap();
 
         let body = fs::read_to_string(&config_path).unwrap();
         assert!(body.contains("FORCE_UPLOAD=\"true\""));
@@ -1334,7 +1377,8 @@ mod tests {
         }))
         .unwrap();
 
-        write_backend_policy_to_config(&config, &response, false).unwrap();
+        write_backend_policy_to_config(&config, &response, &ReportedGlobals::default(), false)
+            .unwrap();
 
         let body = fs::read_to_string(&config_path).unwrap();
         assert!(body.contains("SYSTEMS=\"none\""));
@@ -1365,14 +1409,16 @@ mod tests {
         }))
         .unwrap();
 
-        write_backend_policy_to_config(&config, &response, false).unwrap();
+        write_backend_policy_to_config(&config, &response, &ReportedGlobals::default(), false)
+            .unwrap();
         let after_first = count_backend_backups(tmp.path());
         assert_eq!(
             after_first, 1,
             "the first write did not snapshot the config"
         );
 
-        write_backend_policy_to_config(&config, &response, false).unwrap();
+        write_backend_policy_to_config(&config, &response, &ReportedGlobals::default(), false)
+            .unwrap();
         assert_eq!(
             count_backend_backups(tmp.path()),
             after_first,
