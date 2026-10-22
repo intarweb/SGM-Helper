@@ -727,6 +727,43 @@ fn classify_core(
     }
 
     let save_lower = save_path.to_string_lossy().to_ascii_lowercase();
+    // 3DO and Jaguar saves are told apart by the directory their emulator
+    // writes, never by their size alone: 32 KiB and 128 B are ordinary sizes
+    // for other systems too. The needles are path components or delimited
+    // names, so a game title or a random directory cannot name either system.
+    if contains_any_needle(&save_lower, &["/3do/", "\\3do\\", "3do", "panasonic 3do"]) {
+        if is_plausible_save_for_system(&save_ext, save_size, "3do") {
+            return classify_if_valid(
+                save_path,
+                &save_ext,
+                save_size,
+                "3do",
+                format!("path hint 3do + .{} ({} bytes)", save_ext, save_size),
+            );
+        }
+        return None;
+    }
+    if contains_any_needle(
+        &save_lower,
+        &[
+            "/jaguar/",
+            "\\jaguar\\",
+            "atarijaguar",
+            "atari jaguar",
+            "virtualjaguar",
+        ],
+    ) {
+        if is_plausible_save_for_system(&save_ext, save_size, "atari-jaguar") {
+            return classify_if_valid(
+                save_path,
+                &save_ext,
+                save_size,
+                "atari-jaguar",
+                format!("path hint jaguar + .{} ({} bytes)", save_ext, save_size),
+            );
+        }
+        return None;
+    }
     if contains_any_needle(
         &save_lower,
         &[
@@ -1429,6 +1466,8 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
         "snes" => matches!(ext, "srm" | "sav" | "sa1"),
         "gameboy" => matches!(ext, "sav" | "srm" | "gme" | "rtc" | "ram"),
         "gba" => matches!(ext, "sav" | "srm" | "sa1"),
+        "3do" => matches!(ext, "srm" | "sav"),
+        "atari-jaguar" => matches!(ext, "srm" | "sav"),
         "n64" => matches!(ext, "eep" | "fla" | "sra" | "mpk" | "cpk" | "srm"),
         "nds" => matches!(ext, "sav" | "dsv"),
         // Azahar/Citra store per-title save data under nand/ and sdmc/; the
@@ -1565,6 +1604,12 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
                 || size == PS1_PSP_VMP_HEADER_LENGTH + PS1_MEMCARD_SIZE
         }
         "ps2" => (8 * 1024 * 1024..=128 * 1024 * 1024).contains(&size) && size.is_multiple_of(512),
+        // 3DO's per-game SRAM is 32 KiB; some titles reserve more.
+        "3do" => matches!(size, 32_768 | 65_536 | 131_072),
+        // A Jaguar cart's EEPROM is 128 bytes and its RAM runs to 2 MiB.
+        "atari-jaguar" => {
+            size == 128 || (size.is_power_of_two() && (128..=2_097_152).contains(&size))
+        }
         "psp" | "psvita" | "ps3" => (1024..=67_108_864).contains(&size),
         "ps4" | "ps5" => (1024..=268_435_456).contains(&size),
         _ => false,
@@ -3064,6 +3109,68 @@ mod tests {
                 "{hint}"
             );
         }
+    }
+
+    #[test]
+    fn a_three_do_save_classifies_from_its_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp
+            .path()
+            .join("saves/3do/opera/per_game/20th Century Video Almanac (USA).0.srm");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::write(&save, vec![0xA5u8; 32_768]).unwrap();
+
+        assert_eq!(
+            infer_supported_console_slug(&save, None).as_deref(),
+            Some("3do")
+        );
+    }
+
+    #[test]
+    fn a_jaguar_save_classifies_from_its_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in [
+            "Iron Soldier (World).srm",
+            "Iron Soldier (World).zip#Iron Soldier (World).cdrom.srm",
+        ] {
+            let save = tmp.path().join("saves/atarijaguar").join(name);
+            fs::create_dir_all(save.parent().unwrap()).unwrap();
+            fs::write(&save, vec![0xA5u8; 128]).unwrap();
+
+            assert_eq!(
+                infer_supported_console_slug(&save, None).as_deref(),
+                Some("atari-jaguar"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_jaguar_sized_save_under_genesis_is_not_jaguar() {
+        // 128 bytes is a plausible size for more than one system; the
+        // directory decides, and a coincidental size must not.
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp.path().join("saves/genesis/Iron Soldier (World).srm");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::write(&save, vec![0xA5u8; 128]).unwrap();
+
+        assert_ne!(
+            infer_supported_console_slug(&save, None).as_deref(),
+            Some("atari-jaguar")
+        );
+    }
+
+    #[test]
+    fn a_three_do_sized_save_under_psx_is_not_three_do() {
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp.path().join("saves/psx/Some Game.srm");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::write(&save, vec![0xA5u8; 32_768]).unwrap();
+
+        assert_ne!(
+            infer_supported_console_slug(&save, None).as_deref(),
+            Some("3do")
+        );
     }
 
     #[test]
