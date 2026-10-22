@@ -710,6 +710,30 @@ pub fn classify_supported_save(
     }
 
     let save_lower = save_path.to_string_lossy().to_ascii_lowercase();
+    // The ROM's own path names the system, and the index is the only local
+    // place that knows it: the server's lookup returns a sha1 derived from the
+    // stem and no system at all. This runs before the save-directory hints, so
+    // a Game Gear save sitting in `saves/genesis/` is classified by the ROM.
+    if let Some(rom_path) = rom_path {
+        let rom_lower = rom_path.to_string_lossy().to_ascii_lowercase();
+        for (slug, needles) in ROM_PATH_SYSTEM_HINTS {
+            if contains_any_needle(&rom_lower, needles)
+                && is_plausible_save_for_system(&save_ext, save_size, slug)
+            {
+                return classify_if_valid(
+                    save_path,
+                    &save_ext,
+                    save_size,
+                    slug,
+                    format!(
+                        "rom path hint {} + .{} ({} bytes)",
+                        slug, save_ext, save_size
+                    ),
+                );
+            }
+        }
+    }
+
     // 3DO and Jaguar saves are told apart by the directory their emulator
     // writes, never by their size alone: 32 KiB and 128 B are ordinary sizes
     // for other systems too. The needles are path components or delimited
@@ -1142,6 +1166,21 @@ fn path_extension(path: &Path) -> Option<String> {
         .and_then(|value| value.to_str())
         .map(|value| value.to_ascii_lowercase())
 }
+
+/// Systems a ROM's own path can name when the save directory cannot.
+///
+/// The lookup endpoint derives its sha1 from the filename stem and returns no
+/// system, so the ROM index is the only local evidence of which system a title
+/// belongs to. A Game Gear save lives under `saves/genesis/` because
+/// genesis_plus_gx serves both systems, while the ROM sits in `Sega Game Gear/`.
+const ROM_PATH_SYSTEM_HINTS: &[(&str, &[&str])] = &[
+    ("game-gear", &["sega game gear", "gamegear", "game gear"]),
+    (
+        "master-system",
+        &["sega master system", "mastersystem", "master system"],
+    ),
+    ("genesis", &["sega genesis", "megadrive", "mega drive"]),
+];
 
 fn system_slug_from_rom_extension(ext: String) -> Option<&'static str> {
     match ext.as_str() {
@@ -3115,6 +3154,69 @@ mod tests {
             infer_supported_console_slug(&save, None).as_deref(),
             Some("3do")
         );
+    }
+
+    // genesis_plus_gx serves Genesis and Game Gear, so a Game Gear save lives
+    // in `saves/genesis/`. The ROM's own path is the evidence, and it is local:
+    // the server's lookup returns a stem hash and no system.
+    #[test]
+    fn a_game_gear_rom_names_the_system_its_save_directory_does_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp
+            .path()
+            .join("saves/genesis/Defenders of Oasis (USA, Europe).srm");
+        let rom = tmp
+            .path()
+            .join("roms/Sega Game Gear/Defenders of Oasis (USA, Europe).zip");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::create_dir_all(rom.parent().unwrap()).unwrap();
+        fs::write(&save, vec![0xA5u8; 8192]).unwrap();
+        fs::write(&rom, b"zip").unwrap();
+
+        let classification = classify_supported_save(&save, Some(rom.as_path())).unwrap();
+        assert_eq!(classification.system_slug, "game-gear");
+        assert!(
+            classification.evidence.contains("rom path hint"),
+            "the evidence does not name the ROM path: {}",
+            classification.evidence
+        );
+    }
+
+    #[test]
+    fn a_genesis_rom_keeps_a_genesis_save_a_genesis_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp
+            .path()
+            .join("saves/genesis/Sonic the Hedgehog (USA).srm");
+        let rom = tmp
+            .path()
+            .join("roms/Sega Genesis/Sonic the Hedgehog (USA).zip");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::create_dir_all(rom.parent().unwrap()).unwrap();
+        fs::write(&save, vec![0xA5u8; 8192]).unwrap();
+        fs::write(&rom, b"zip").unwrap();
+
+        let classification = classify_supported_save(&save, Some(rom.as_path())).unwrap();
+        assert_eq!(classification.system_slug, "genesis");
+    }
+
+    // The ROM path is evidence only for a size the system accepts; it does not
+    // override the plausibility arms.
+    #[test]
+    fn a_rom_path_does_not_excuse_an_implausible_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp
+            .path()
+            .join("saves/genesis/Defenders of Oasis (USA, Europe).srm");
+        let rom = tmp
+            .path()
+            .join("roms/Sega Game Gear/Defenders of Oasis (USA, Europe).zip");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::create_dir_all(rom.parent().unwrap()).unwrap();
+        fs::write(&save, vec![0xA5u8; 8]).unwrap();
+        fs::write(&rom, b"zip").unwrap();
+
+        assert_eq!(classify_supported_save(&save, Some(rom.as_path())), None);
     }
 
     #[test]

@@ -2348,6 +2348,15 @@ fn process_single_save(
         .and_then(|machine| rom_index.get(&machine.to_ascii_lowercase()))
         .or(rom_entry);
     let classification_evidence = classification.evidence;
+    if verbose && rom_entry_for_rom.is_none() {
+        // Naming the fallback matters: the same save classifies differently
+        // depending on whether the ROM root resolved, and an unnamed fallback
+        // reads as a flapping bug rather than a missing precondition.
+        eprintln!(
+            "No ROM for {:?} in the index; {} classified from its save path",
+            rom_stem, system_slug
+        );
+    }
     if !source_allows_system(source_systems, &system_slug) {
         report.skipped += 1;
         if verbose {
