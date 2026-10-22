@@ -902,9 +902,21 @@ fn known_scan_candidates(
         origin: "autoscan-known".to_string(),
     });
 
+    Ok(dedupe_candidates_by_save_path(candidates))
+}
+
+/// One source per save root.
+///
+/// Several candidates resolve to the same directory on a MiSTer -- the
+/// `${kind} Default`, `${kind} Root Direct` and `MiSTer SD` entries all point at
+/// /media/fat/saves with different rom paths. Deduping on save and rom together
+/// kept all of them, so the same files were scanned once per source and each
+/// source applied its own SYSTEMS list; a system missing from any one list was
+/// silently dropped from the pass.
+fn dedupe_candidates_by_save_path(mut candidates: Vec<CandidatePath>) -> Vec<CandidatePath> {
     candidates.sort_by(|a, b| a.id.cmp(&b.id));
-    candidates.dedup_by(|a, b| a.save_path == b.save_path && a.rom_path == b.rom_path);
-    Ok(candidates)
+    candidates.dedup_by(|a, b| a.save_path == b.save_path);
+    candidates
 }
 
 fn evaluate_candidates(candidates: Vec<CandidatePath>) -> Vec<EvaluatedCandidate> {
@@ -1593,5 +1605,47 @@ HELLO="world"
             emudeck_root.clone(),
         ]);
         assert_eq!(selected, Some(emudeck_root));
+    }
+
+    #[test]
+    fn candidates_over_one_save_root_collapse_to_one_source() {
+        // A MiSTer produces all of these: Default and Root Direct from the
+        // configured kind, plus the known MiSTer SD candidate. They differ in
+        // rom path and label, and they are the same files.
+        let make = |id: &str, label: &str, save: &str, rom: &str| CandidatePath {
+            id: id.to_string(),
+            label: label.to_string(),
+            kind: SourceKind::MisterFpga,
+            profile: EmulatorProfile::Mister,
+            save_path: PathBuf::from(save),
+            rom_path: PathBuf::from(rom),
+            recursive: true,
+            origin: "autoscan-known".to_string(),
+        };
+        let candidates = vec![
+            make(
+                "mister_sd",
+                "MiSTer SD",
+                "/media/fat/saves",
+                "/media/fat/games",
+            ),
+            make(
+                "mister-fpga_default",
+                "mister-fpga Default",
+                "/media/fat/saves",
+                "/media/fat/games/mister",
+            ),
+            make(
+                "mister-fpga_root",
+                "mister-fpga Root Direct",
+                "/media/fat/saves",
+                "/media/fat/saves",
+            ),
+            make("other", "Other", "/media/fat/mister", "/media/fat/games"),
+        ];
+
+        let deduped = dedupe_candidates_by_save_path(candidates);
+        let ids: Vec<&str> = deduped.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["mister-fpga_default", "other"]);
     }
 }
