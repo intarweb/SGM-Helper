@@ -599,7 +599,17 @@ pub fn run_sync(
                         // Counting it as an error made a first run report errors=3 and, in
                         // the service, look like a fault to retry. It is held for as long
                         // as the file is unchanged.
-                        if let Some(status) = permanent_rejection_status(&err) {
+                        // Only a refusal of the upload is a refusal of the save. A lookup
+                        // or a conflict check the server refuses says nothing about whether
+                        // the save would be accepted, and recording it permanently froze
+                        // saves whose declared profile belonged to another system until the
+                        // marker expired.
+                        let refused_upload = err
+                            .chain()
+                            .any(|cause| cause.to_string().starts_with("POST /saves"));
+                        if let Some(status) =
+                            permanent_rejection_status(&err).filter(|_| refused_upload)
+                        {
                             report.rejected_permanent += 1;
                             eprintln!(
                                 "Refused {} (status {}): {:#}",

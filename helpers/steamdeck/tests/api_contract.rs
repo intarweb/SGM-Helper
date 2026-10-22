@@ -3958,3 +3958,106 @@ fn a_refusal_names_the_request_it_came_from() {
         "the refusal does not name the request:\n{stderr}"
     );
 }
+
+fn lookup_helper() -> Command {
+    Command::cargo_bin("sgm-steamdeck-helper").unwrap()
+}
+
+// A lookup that the server refuses is not a save the server refused. It used to
+// be recorded as a permanent rejection of the save, which is why a mismatch on
+// the lookup (a profile that belongs to another system) froze two saves for
+// days and looked like an upload refusal in the log.
+#[test]
+fn a_refused_lookup_is_not_a_permanent_rejection_of_the_save() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_lookup","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"lookup@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"count":1,"rom":{"fileName":"Unknown.srm","game":{"id":878081,"name":"Unknown","system":null},"sha1":"42e3a0c0ad9ad9df53284b030b7fdf00f658d413","md5":"139d88db2fec53ba778c7d5d999c51a5"},"success":true}"#);
+    });
+    let _latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(400)
+            .header("content-type", "application/json")
+            .body(r#"{"error":"Bad Request","message":"runtimeProfile \"genesis/retroarch-genesis-plus-gx\" belongs to genesis, but this save is recorded as game-gear","statusCode":400}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(
+                r#"{"success":true,"save":{"id":"save-lookup","sha256":"sha-lookup","version":1}}"#,
+            );
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("RetroArch/saves/genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("RetroArch/saves/genesis/Defenders of Oasis (USA, Europe).srm"),
+        vec![0xC7u8; 65536],
+    )
+    .unwrap();
+    let config = tmp.path().join("config-lookup.ini");
+    fs::write(
+        &config,
+        format!(
+            "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.retroarch]\nLABEL=\"RetroArch\"\nKIND=\"retroarch\"\nPROFILE=\"retroarch\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"genesis\"\n",
+            server.port(),
+            root.display(),
+            state_dir.display(),
+            root.join("RetroArch/saves").display(),
+            root.join("roms").display()
+        ),
+    )
+    .unwrap();
+
+    lookup_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("lookup@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = lookup_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        upload.calls(),
+        0,
+        "an upload was attempted:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stderr.contains("GET /save/latest"),
+        "the failure does not name the request that failed:\n{stderr}"
+    );
+    let state = fs::read_to_string(state_dir.join("sync_state.json")).unwrap_or_default();
+    assert!(
+        !state.contains("terminal_rejections") || state.contains("\"terminal_rejections\": {}"),
+        "a refused lookup was stored as a permanent rejection of the save:\n{state}"
+    );
+}

@@ -620,7 +620,7 @@ impl ApiClient {
             request = request.header("X-RSM-App-Password", app_password.trim().to_string());
         }
         let response = request.send().context("request naar /save/latest faalde")?;
-        parse_json_response(response)
+        parse_json_response(response).with_context(|| "GET /save/latest")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -826,7 +826,7 @@ impl ApiClient {
         let response = request
             .send()
             .context("request naar /conflicts/check faalde")?;
-        parse_json_response(response)
+        parse_json_response(response).with_context(|| "GET /conflicts/check")
     }
 
     #[allow(clippy::too_many_arguments)]
