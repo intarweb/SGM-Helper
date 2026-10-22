@@ -148,6 +148,7 @@ pub fn run_service(
 
     let heartbeat_interval = Duration::from_secs(options.heartbeat_interval_secs);
     let reconcile_interval = Duration::from_secs(options.reconcile_interval_secs);
+    let mut last_upload_at: Option<Instant> = None;
     let mut next_heartbeat = Instant::now() + heartbeat_interval;
     let mut next_reconcile = Instant::now();
     let mut pending_action = Some(ServiceAction {
@@ -228,6 +229,9 @@ pub fn run_service(
                             report.errors
                         ));
                     }
+                    if report.uploaded > 0 {
+                        last_upload_at = Some(Instant::now());
+                    }
                     runtime.last_sync = Some(report);
                 }
                 Err(err) => {
@@ -301,9 +305,7 @@ pub fn run_service(
             .min(next_reconcile)
             .saturating_duration_since(Instant::now());
         match rx.recv_timeout(wait_for) {
-            Ok(ServiceSignal::SyncRequested(reason))
-            | Ok(ServiceSignal::ConfigChanged(reason))
-            | Ok(ServiceSignal::SaveChanged(reason)) => {
+            Ok(ServiceSignal::SyncRequested(reason)) | Ok(ServiceSignal::ConfigChanged(reason)) => {
                 pending_action = Some(ServiceAction {
                     reason,
                     scan: false,
@@ -311,6 +313,24 @@ pub fn run_service(
                     apply_scan: false,
                 });
             }
+            Ok(ServiceSignal::SaveChanged(reason)) => {
+                if save_event_is_our_echo(last_upload_at, Instant::now()) {
+                    if verbose {
+                        eprintln!(
+                            "Ignoring save event '{}': this helper uploaded moments ago",
+                            reason
+                        );
+                    }
+                    continue;
+                }
+                pending_action = Some(ServiceAction {
+                    reason,
+                    scan: false,
+                    deep_scan: false,
+                    apply_scan: false,
+                });
+            }
+
             Ok(ServiceSignal::ScanRequested(reason)) => {
                 pending_action = Some(ServiceAction {
                     reason,
@@ -635,6 +655,18 @@ fn spawn_service_sse_listener(
             thread::sleep(Duration::from_secs(1));
         }
     });
+}
+
+/// How long after our own upload a save event is treated as our echo. The
+/// server emits `save.*` for every record written, including the ones this
+/// helper just wrote, so a pass that uploaded anything would otherwise start
+/// the next one immediately -- an upload/event/upload loop.
+const SELF_ECHO_WINDOW: Duration = Duration::from_secs(10);
+
+fn save_event_is_our_echo(last_upload: Option<Instant>, now: Instant) -> bool {
+    last_upload
+        .map(|uploaded| now.saturating_duration_since(uploaded) < SELF_ECHO_WINDOW)
+        .unwrap_or(false)
 }
 
 fn service_signal_from_event(event_name: &str, data: &str) -> Option<ServiceSignal> {
@@ -1154,5 +1186,29 @@ mod tests {
         assert!(payload["sensors"]["configHash"].as_str().unwrap().len() >= 64);
         let serialized = serde_json::to_string(&payload).unwrap();
         assert!(!serialized.contains("secret"));
+    } // The service syncs on the server's save events, and those events include
+    // the records this helper has just written. Without a guard the pass
+    // re-arms itself: upload, event, sync, upload. A save event that arrives
+    // within the echo window of our own upload is ours, not another device's.
+    #[test]
+    fn a_save_event_inside_the_echo_window_is_ignored() {
+        let uploaded = Instant::now();
+        assert!(save_event_is_our_echo(
+            Some(uploaded),
+            uploaded + Duration::from_secs(1)
+        ));
+        assert!(save_event_is_our_echo(
+            Some(uploaded),
+            uploaded + SELF_ECHO_WINDOW - Duration::from_millis(1)
+        ));
+        assert!(!save_event_is_our_echo(
+            Some(uploaded),
+            uploaded + SELF_ECHO_WINDOW
+        ));
+        assert!(!save_event_is_our_echo(None, uploaded));
+        assert!(!save_event_is_our_echo(
+            Some(uploaded),
+            uploaded + Duration::from_secs(60)
+        ));
     }
 }
