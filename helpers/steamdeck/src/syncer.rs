@@ -1425,6 +1425,22 @@ fn cloud_restore_native_target_path(
     )
 }
 
+/// Directories a core-sorted emulator keeps another system's saves in.
+///
+/// Consulted only when looking for a file that already exists, never when
+/// choosing where a new save goes: on most devices the system's own directory
+/// is the right one. RetroArch with `sort_savefiles_enable` files saves by the
+/// core that reads them, and `genesis_plus_gx` serves Genesis and Game Gear
+/// alike, so a Game Gear save lives under `genesis/` and the core reads it
+/// there. This list is deliberately separate from `system_directory_aliases`,
+/// which also decides where new saves are written.
+fn writeback_directory_aliases(system_slug: &str) -> &'static [&'static str] {
+    match system_slug {
+        "game-gear" => &["genesis", "megadrive", "md"],
+        _ => &[],
+    }
+}
+
 fn existing_cloud_target_for_alias(
     root: &Path,
     source_kind: &SourceKind,
@@ -1445,7 +1461,71 @@ fn existing_cloud_target_for_alias(
             return Some(candidate);
         }
     }
-    None
+
+    let declared = writeback_directory_aliases(system_slug);
+    let directories: Vec<(String, PathBuf)> = std::fs::read_dir(root)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+                .filter_map(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .map(|name| (name.to_string(), entry.path()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // A directory the core actually reads from, named by the operator or by the
+    // core itself ("Genesis Plus GX").
+    for (name, path) in &directories {
+        let token = normalize_path_token(name);
+        if declared
+            .iter()
+            .any(|alias| normalize_path_token(alias) == token)
+        {
+            let candidate = path.join(filename);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // The general case: a cores-sorted tree this helper has no list for. Look
+    // for the exact filename one level under this root. One match is the file
+    // that is already there; more than one is a guess, and a guess writes over
+    // a save that belongs to another game.
+    let mut matches: Vec<PathBuf> = directories
+        .iter()
+        .map(|(_, path)| path.join(filename))
+        .filter(|candidate| candidate.is_file())
+        .collect();
+    matches.sort();
+    match matches.len() {
+        0 => None,
+        1 => {
+            eprintln!(
+                "Restoring into {}: it already holds {}",
+                matches[0].display(),
+                filename
+            );
+            matches.pop()
+        }
+        _ => {
+            eprintln!(
+                "More than one directory holds {}: {}; using the system directory instead",
+                filename,
+                matches
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            None
+        }
+    }
 }
 
 fn preferred_system_directory_for_root(

@@ -3871,3 +3871,177 @@ fn a_missing_rom_root_is_reported() {
         "the ROM root report does not say what it found:\n{stderr}"
     );
 }
+
+fn wb_helper() -> Command {
+    Command::cargo_bin("sgm-mister-helper").unwrap()
+}
+
+// RetroArch with sort_savefiles_enable files saves by the core that reads them,
+// so a Game Gear save lives under `genesis/` because genesis_plus_gx serves
+// both systems. The server names the system correctly; the helper looked only
+// for a system-named directory, missed, and skipped the restore.
+#[test]
+fn a_cloud_save_is_restored_into_the_directory_that_already_holds_it() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_writeback","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"writeback@example.com"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":1,"limit":100,"offset":0,"saves":[{"id":"save-defenders","filename":"Defenders of Oasis (USA, Europe).srm","displayTitle":"Defenders of Oasis","systemSlug":"game-gear","sha256":"701641b95e5e7394","version":3,"latestSizeBytes":65536}]}"#);
+    });
+    let download = server.mock(|when, then| {
+        when.method(GET).path("/saves/download");
+        then.status(200).body(vec![0xC7u8; 65536]);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let local = root.join("saves/genesis/Defenders of Oasis (USA, Europe).srm");
+    fs::write(&local, vec![0xC7u8; 65536]).unwrap();
+    let config = writeback_config(&tmp, &server, &root, &state_dir);
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("writeback@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(download.calls(), 1, "the restore was skipped:\n{stderr}");
+    assert!(local.exists(), "the save is gone:\n{stderr}");
+    // Nothing is created: the directory the core reads already exists.
+    assert!(
+        !root.join("saves/gamegear").exists(),
+        "a new system directory was created:\n{stderr}"
+    );
+}
+
+// Two directories holding the same filename is a guess the helper must not
+// make: writing to either could overwrite another game's save.
+#[test]
+fn an_ambiguous_write_back_refuses_to_guess() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_ambiguous","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"ambiguous@example.com"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":1,"limit":100,"offset":0,"saves":[{"id":"save-defenders","filename":"Defenders of Oasis (USA, Europe).srm","displayTitle":"Defenders of Oasis","systemSlug":"game-gear","sha256":"701641b95e5e7394","version":3,"latestSizeBytes":65536}]}"#);
+    });
+    let download = server.mock(|when, then| {
+        when.method(GET).path("/saves/download");
+        then.status(200).body(vec![0xC7u8; 65536]);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/core-a")).unwrap();
+    fs::create_dir_all(root.join("saves/core-b")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let first = root.join("saves/core-a/Defenders of Oasis (USA, Europe).srm");
+    let second = root.join("saves/core-b/Defenders of Oasis (USA, Europe).srm");
+    fs::write(&first, vec![0x11u8; 65536]).unwrap();
+    fs::write(&second, vec![0x22u8; 65536]).unwrap();
+    let config = writeback_config(&tmp, &server, &root, &state_dir);
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("ambiguous@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(download.calls(), 0, "a guess was made:\n{stderr}");
+    assert!(
+        fs::read(&first).unwrap() == vec![0x11u8; 65536]
+            && fs::read(&second).unwrap() == vec![0x22u8; 65536],
+        "one of the candidate files was overwritten:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("More than one directory holds"),
+        "the refusal does not name the candidates:\n{stderr}"
+    );
+}
+
+fn writeback_config(
+    tmp: &tempfile::TempDir,
+    server: &MockServer,
+    root: &std::path::Path,
+    state_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    let config = tmp.path().join("config-writeback.ini");
+    fs::write(
+        &config,
+        format!(
+            "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.retroarch]\nLABEL=\"RetroArch\"\nKIND=\"retroarch\"\nPROFILE=\"retroarch\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"game-gear\"\n",
+            server.port(),
+            root.display(),
+            state_dir.display(),
+            root.join("saves").display(),
+            root.join("roms").display()
+        ),
+    )
+    .unwrap();
+    config
+}
