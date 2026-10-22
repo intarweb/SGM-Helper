@@ -4800,20 +4800,16 @@ fn a_save_whose_stem_is_in_two_systems_uses_its_own_directory() {
     let root = tmp.path().join("root");
     let state_dir = tmp.path().join("state");
     fs::create_dir_all(root.join("saves/nes")).unwrap();
-    fs::create_dir_all(root.join("roms/MegaDrive")).unwrap();
-    fs::create_dir_all(root.join("roms/Nintendo NES")).unwrap();
+    fs::create_dir_all(root.join("roms/megadrive")).unwrap();
+    fs::create_dir_all(root.join("roms/nes")).unwrap();
     fs::create_dir_all(&state_dir).unwrap();
     fs::write(
         root.join("saves/nes/Tecmo Super Bowl (USA).srm"),
         vec![0xA5u8; 8192],
     )
     .unwrap();
-    fs::write(root.join("roms/MegaDrive/Tecmo Super Bowl (USA).zip"), b"x").unwrap();
-    fs::write(
-        root.join("roms/Nintendo NES/Tecmo Super Bowl (USA).zip"),
-        b"x",
-    )
-    .unwrap();
+    fs::write(root.join("roms/megadrive/Tecmo Super Bowl (USA).zip"), b"x").unwrap();
+    fs::write(root.join("roms/nes/Tecmo Super Bowl (USA).zip"), b"x").unwrap();
     let config = writeback_config_for(&tmp, &server, &root, &state_dir, "nes");
 
     wb_helper()
@@ -4847,7 +4843,7 @@ fn a_save_whose_stem_is_in_two_systems_uses_its_own_directory() {
     // The decision has to be visible: an ambiguous stem that is resolved
     // silently is indistinguishable from one that was never noticed.
     assert!(
-        stderr.contains("is held by genesis"),
+        stderr.contains("is held by genesis, nes"),
         "the ambiguity and its candidates were not named:\n{stderr}"
     );
     assert!(

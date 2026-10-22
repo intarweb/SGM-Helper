@@ -125,25 +125,91 @@ pub fn discover_save_files(roots: &[PathBuf], recursive: bool) -> Result<Vec<Pat
 }
 
 /// The system a ROM's own path names, if it names one.
+/// The vault's own directory names for the systems the helper classifies.
+///
+/// A candidate named by its directory and a save classified by its slug have to
+/// be the same vocabulary, or a comparison between them silently misses the
+/// systems whose row is absent. The names are the ones the vault actually uses;
+/// a directory not listed here is reported with a trailing `?` so a missing row
+/// is visible rather than looking like a slug.
+const ROM_DIRECTORY_SYSTEMS: &[(&str, &str)] = &[
+    ("3do", "3do"),
+    ("atarijaguar", "atari-jaguar"),
+    ("colecovision", "colecovision"),
+    ("dreamcast", "dreamcast"),
+    ("gameboy", "gameboy"),
+    ("gamecube", "gamecube"),
+    ("gamegear", "game-gear"),
+    ("gb", "gameboy"),
+    ("gba", "gba"),
+    ("gbc", "gameboy"),
+    ("genesis", "genesis"),
+    ("mame", "arcade"),
+    ("mastersystem", "master-system"),
+    ("megadrive", "genesis"),
+    ("n64", "n64"),
+    ("nds", "nds"),
+    ("neogeo", "neogeo"),
+    ("neogeocd", "neogeo-cd"),
+    ("nes", "nes"),
+    ("ngp", "ngp"),
+    ("ngpc", "ngp"),
+    ("pcengine", "pc-engine"),
+    ("pcenginecd", "pc-engine"),
+    ("psp", "psp"),
+    ("psx", "psx"),
+    ("saturn", "saturn"),
+    ("sega32x", "sega-32x"),
+    ("segacd", "sega-cd"),
+    ("sg1000", "sg-1000"),
+    ("snes", "snes"),
+    ("virtualboy", "virtualboy"),
+    ("wii", "wii"),
+];
+
+fn rom_directory_token(name: &str) -> Option<&'static str> {
+    let normalized: String = name
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    ROM_DIRECTORY_SYSTEMS
+        .iter()
+        .find(|(directory, _)| *directory == normalized)
+        .map(|(_, slug)| *slug)
+}
+
 /// A name for the system a ROM path belongs to, good enough to tell two of them
 /// apart: the known slug when the path names one, otherwise its own directory
 /// name. Two ROMs of one stem under different names are ambiguous whatever the
 /// table knows, which is the case a NES ROM beside a Mega Drive ROM makes.
 fn rom_system_token(path: &Path) -> String {
+    let directory = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str());
+    if let Some(name) = directory
+        && let Some(slug) = rom_directory_token(name)
+    {
+        return slug.to_string();
+    }
     if let Some(slug) = system_for_rom_path(path) {
         return slug.to_string();
     }
-    path.parent()
-        .and_then(|parent| parent.file_name())
-        .and_then(|name| name.to_str())
+    directory
         .map(|name| {
-            name.chars()
+            let normalized: String = name
+                .chars()
                 .filter(|ch| ch.is_ascii_alphanumeric())
                 .collect::<String>()
-                .to_ascii_lowercase()
+                .to_ascii_lowercase();
+            if normalized.is_empty() {
+                "unknown?".to_string()
+            } else {
+                format!("{normalized}?")
+            }
         })
-        .filter(|token| !token.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
+        .unwrap_or_else(|| "unknown?".to_string())
 }
 
 fn system_for_rom_path(path: &Path) -> Option<&'static str> {
@@ -3283,6 +3349,31 @@ mod tests {
     // The index keeps one path per stem, so which system a save got depended on
     // the order the walk reached the ROMs in: a NES save was classified genesis
     // and refused as "belongs to genesis".
+    // The candidate names in the log come from this table, so a directory the
+    // vault uses and a slug the classifier derives are one vocabulary.
+    #[test]
+    fn rom_directory_names_map_to_the_clients_slugs() {
+        assert_eq!(rom_directory_token("gbc"), Some("gameboy"));
+        assert_eq!(rom_directory_token("megadrive"), Some("genesis"));
+        assert_eq!(rom_directory_token("ngpc"), Some("ngp"));
+        assert_eq!(rom_directory_token("neogeocd"), Some("neogeo-cd"));
+        assert_eq!(rom_directory_token("pcenginecd"), Some("pc-engine"));
+        assert_eq!(rom_directory_token("mame"), Some("arcade"));
+        assert_eq!(rom_directory_token("nes"), Some("nes"));
+    }
+
+    // A directory with no row is reported as one, not as a slug.
+    #[test]
+    fn an_unknown_rom_directory_is_marked_as_a_guess() {
+        assert_eq!(rom_directory_token("nintendones"), None);
+        assert_eq!(
+            rom_system_token(Path::new(
+                "/vault/roms/nintendones/Tecmo Super Bowl (USA).zip"
+            )),
+            "nintendones?"
+        );
+    }
+
     #[test]
     fn a_stem_in_two_systems_is_ambiguous() {
         let tmp = tempfile::tempdir().unwrap();
