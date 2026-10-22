@@ -323,7 +323,7 @@ fn dispatch(cli: Cli, loaded: LoadedConfig) -> Result<()> {
 
             if !cli.quiet {
                 println!(
-                    "Sync complete{}: scanned={} uploaded={} downloaded={} in_sync={} conflicts={} skipped={} rejected_n64_controller_pak={} refused_size_mismatch={} refused_flattened_components={} accepted_not_stored={} rejected_permanent={} duplicate_ignored={} skipped_by_policy={} errors={} would_upload={} would_download={}  \
+                    "Sync complete{}: scanned={} uploaded={} downloaded={} in_sync={} conflicts={} skipped={} rejected_n64_controller_pak={} refused_size_mismatch={} refused_flattened_components={} accepted_not_stored={} rejected_permanent={} duplicate_ignored={} skipped_by_policy={} errors={} unaccounted={} would_upload={} would_download={}  \
                      (scanned = local saves found once; skipped = per-pass decisions across upload and restore, so it can exceed scanned)",
                     dry_run_marker(&report),
                     report.scanned,
@@ -340,6 +340,7 @@ fn dispatch(cli: Cli, loaded: LoadedConfig) -> Result<()> {
                     report.duplicate_ignored,
                     report.skipped_by_policy,
                     report.errors,
+                    report.unaccounted,
                     report.would_upload,
                     report.would_download
                 );

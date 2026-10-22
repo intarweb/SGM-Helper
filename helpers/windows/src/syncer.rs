@@ -74,7 +74,35 @@ pub struct SyncReport {
     /// pass does not ask again.
     pub duplicate_pending: Vec<(String, String)>,
     pub errors: usize,
+    /// Files the pass read and then neither decided nor counted. Every path
+    /// through a save is supposed to end in a counter; one that does not is a
+    /// save that can vanish while the run reports success, so the caller checks
+    /// this after every file and names the file when it finds one.
+    pub unaccounted: usize,
     pub dry_run: bool,
+}
+
+impl SyncReport {
+    /// How many per-save decisions this report holds. Compared before and after
+    /// each save to catch a pass that read a file and did nothing with it.
+    fn decisions(&self) -> usize {
+        self.uploaded
+            + self.would_upload
+            + self.downloaded
+            + self.would_download
+            + self.in_sync
+            + self.conflicts
+            + self.skipped
+            + self.rejected_n64_controller_pak
+            + self.refused_size_mismatch
+            + self.refused_flattened_components
+            + self.accepted_not_stored
+            + self.rejected_permanent
+            + self.skipped_by_policy
+            + self.duplicate_ignored
+            + self.errors
+            + self.unaccounted
+    }
 }
 
 /// Every upload names the file it took and the record it produced. Without
@@ -485,6 +513,7 @@ pub fn run_sync(
                 sync_state.duplicate_uploads.remove(&save_key);
             }
 
+            let decisions_before = report.decisions();
             let process_result = process_single_save(
                 &api,
                 &save_path,
@@ -516,6 +545,17 @@ pub fn run_sync(
                         sync_state
                             .entries
                             .insert(processed.state_key, processed.entry);
+                    }
+                    // A save that is read and then neither decided nor counted is a save
+                    // that can vanish while the pass reports success. Nothing in this
+                    // function is meant to end that way; if something does, name the
+                    // file rather than trust the code.
+                    if report.decisions() == decisions_before {
+                        report.unaccounted += 1;
+                        eprintln!(
+                            "Unaccounted save: {} was read and produced no decision (this is a client bug)",
+                            save_path.display()
+                        );
                     }
                 }
                 Err(err) => {
@@ -958,6 +998,9 @@ fn restore_single_cloud_save(
 
     if options.dry_run {
         report.would_download += 1;
+        if verbose {
+            eprintln!("Would download {} (dry run)", cloud_save.display_name());
+        }
         return Ok(());
     }
 
@@ -2110,6 +2153,9 @@ fn process_single_save(
     if !latest.exists {
         if options.dry_run {
             report.would_upload += 1;
+            if verbose {
+                eprintln!("Would upload {} (dry run)", save_path.display());
+            }
             return Ok(Some(processed_entry(
                 state_key.clone(),
                 synced_entry(
@@ -2306,6 +2352,13 @@ fn process_single_save(
 
     if latest.sha256.as_deref() == Some(local_sha.as_str()) {
         report.in_sync += 1;
+        if verbose {
+            eprintln!(
+                "In sync with the server: {} (version {})",
+                save_path.display(),
+                latest.version.unwrap_or_default()
+            );
+        }
         return Ok(Some(processed_entry(
             state_key.clone(),
             synced_entry(
@@ -2829,6 +2882,9 @@ fn process_missing_save(
 
     if options.dry_run {
         report.would_download += 1;
+        if verbose {
+            eprintln!("Would download {} (dry run)", save_path.display());
+        }
         return Ok(Some(processed_entry(
             state_key,
             synced_entry(

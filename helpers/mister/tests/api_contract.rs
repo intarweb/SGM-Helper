@@ -252,7 +252,7 @@ fn backend_forced_dry_run_marks_the_summary_and_uploads_nothing() {
         stdout.contains(
             "skipped=1 rejected_n64_controller_pak=0 refused_size_mismatch=0 \
              refused_flattened_components=0 accepted_not_stored=0 \
-             rejected_permanent=0 duplicate_ignored=0 skipped_by_policy=1 errors=0 would_upload=1 would_download=0"
+             rejected_permanent=0 duplicate_ignored=0 skipped_by_policy=1 errors=0 unaccounted=0 would_upload=1 would_download=0"
         ),
         "a skipped save was counted as a simulated upload, or the simulation was missed: {stdout}"
     );
@@ -495,6 +495,89 @@ fn sync_reports_conflict_when_backend_marks_conflict() {
         .success();
 
     assert!(conflict_report.calls() >= 1);
+}
+
+// A dry run that prints only "Detected" and "ROM mapping" leaves the operator
+// unable to tell a save that would upload from one that was dropped. Every
+// decision now has a line of its own.
+#[test]
+fn a_dry_run_names_the_save_it_would_upload() {
+    let expected_line = "ps-line:psx:retroarch:memory-card-1";
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_probe","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"probe@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"ps1sha","md5":"ps1md5"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET)
+            .path("/save/latest")
+            .query_param("romSha1", expected_line);
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-ps1","sha256":"sha-up"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Sony/PSX")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let raw = build_valid_ps1_memcard();
+    fs::write(root.join("Sony/PSX/ff7.gme"), encode_ps1_dexdrive(&raw)).unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("probe@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .arg("--dry-run")
+        .arg("--verbose")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(upload.calls(), 0, "a dry run uploaded:\n{stderr}");
+    assert!(
+        stderr.contains("Would upload") && stderr.contains("ff7.gme"),
+        "the dry run does not name the save it would upload:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("would_upload=1") && stdout.contains("unaccounted=0"),
+        "the summary does not account for the save:\n{stdout}"
+    );
 }
 
 #[test]
