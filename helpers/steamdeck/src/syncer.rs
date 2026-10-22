@@ -365,6 +365,15 @@ pub fn run_sync(
             report.scanned += save_files.len();
 
             for save_path in save_files {
+                // A file the scanner already found but cannot open is an error, not an
+                // unsupported save. The classifier reports an unreadable file as "no
+                // system", so without this a permission or mount fault looks like a save
+                // the helper chose to ignore.
+                if let Err(err) = std::fs::File::open(&save_path) {
+                    report.errors += 1;
+                    eprintln!("Cannot read save {}: {}", save_path.display(), err.kind());
+                    continue;
+                }
                 let selection_key = save_selection_key(&save_path);
                 if let Some(preferred_path) = preferred_save_by_stem.get(&selection_key)
                     && preferred_path != &save_path

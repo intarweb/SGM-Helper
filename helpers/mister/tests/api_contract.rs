@@ -1056,3 +1056,86 @@ fn sync_uploads_a_controller_pak_that_holds_a_note() {
         "a pak with a note in it was counted as empty: {stdout}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_save_is_an_error_not_a_quiet_skip() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_unreadable","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"unreadable@example.com"}}"#);
+    });
+    let _config_sync = server.mock(|when, then| {
+        when.method(POST).path("/helpers/config/sync");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"accepted":true,"global":{"dryRun":true}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    // No path hint, so classification would find no system and the file would
+    // be counted as an ordinary skip. That is the silent-loss shape: an
+    // unreadable save reported as "not a save".
+    fs::create_dir_all(root.join("misc")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let save = root.join("misc/wario.sav");
+    fs::write(&save, vec![0x00u8; 32768]).unwrap();
+    fs::set_permissions(&save, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let config = write_config(&tmp, &server, &root, &state_dir);
+    Command::cargo_bin("sgm-steamdeck-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("unreadable@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin("sgm-steamdeck-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Restore so the tempdir can be removed.
+    let _ = fs::set_permissions(&save, fs::Permissions::from_mode(0o644));
+
+    assert!(
+        stderr.contains("Cannot read save") && stderr.contains("wario.sav"),
+        "an unreadable save was not reported: {stderr}"
+    );
+    assert!(
+        stdout.contains("errors=1"),
+        "the unreadable save was not counted as an error: {stdout}"
+    );
+    assert!(
+        !stdout.contains("scanned=0"),
+        "the file was not counted as scanned: {stdout}"
+    );
+
+    let state = fs::read_to_string(state_dir.join("sync_state.json")).unwrap_or_default();
+    assert!(
+        !state.contains("terminal_rejections\" : {"),
+        "an unreadable save was recorded as a terminal rejection: {state}"
+    );
+}
