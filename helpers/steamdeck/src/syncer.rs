@@ -555,6 +555,7 @@ pub fn run_sync(
                     &source.systems,
                     &rom_index,
                     &mut rom_hash_cache,
+                    &sync_state.entries,
                     app_password,
                     options,
                     &mut report,
@@ -1920,6 +1921,7 @@ fn process_single_save(
     source_systems: &[String],
     rom_index: &HashMap<String, RomIndexEntry>,
     rom_hash_cache: &mut HashMap<String, (String, String)>,
+    known_saves: &HashMap<String, SyncedEntry>,
     app_password: Option<&str>,
     options: &SyncOptions,
     report: &mut SyncReport,
@@ -2069,6 +2071,46 @@ fn process_single_save(
         effective_profile_for_save(source_kind, source_profile, &system_slug, save_path);
     let effective_slot_name =
         resolve_slot_name_for_sync(&system_slug, save_path, &options.slot_name);
+    // A save's identity is its content and its game, not the name the emulator
+    // chose. RetroDECK and RetroArch write one game's save under both
+    // "Madden NFL 94" and "Madden NFL '94 (USA, Europe)"; uploading the second
+    // name creates a second record for one game, and on the authenticated path
+    // the server refuses it as a new game at an unlisted size -- which reads as
+    // data loss when nothing was lost. Arcade is exempt: its components are
+    // named after their device and identical bytes there are a corruption
+    // signal, not a rename.
+    if system_slug != "arcade"
+        && let Some((prior_path, prior_entry)) = save_already_synced_under_another_name(
+            known_saves,
+            save_path,
+            &system_slug,
+            &effective_slot_name,
+            &local_sha,
+        )
+    {
+        report.duplicate_ignored += 1;
+        eprintln!(
+            "Not uploading {}: it is the same save as {} under another name (sha256 {})",
+            save_path.display(),
+            prior_path,
+            local_sha
+        );
+        return Ok(Some(processed_entry(
+            state_key.clone(),
+            synced_entry(
+                local_sha,
+                prior_entry.rom_sha1.clone(),
+                prior_entry.version,
+                Some(&system_slug),
+                Some(normalized_save.local_container),
+                Some(normalized_save.adapter_profile),
+                Some(source_kind),
+                Some(source_name),
+                Some(&effective_slot_name),
+            ),
+        )));
+    }
+
     let device_type = helper_device_type_for_upload(source_kind, &effective_profile, &system_slug);
     let mut runtime_target =
         runtime_target_for_system(source_kind, &effective_profile, &system_slug, device_type);
@@ -4069,6 +4111,55 @@ fn default_adapter_profile_for_container(container: SaveContainerFormat) -> Save
         SaveContainerFormat::Ps1DexDrive => SaveAdapterProfile::Ps1DexDrive,
         SaveContainerFormat::Ps1Vmp => SaveAdapterProfile::Ps1Vmp,
     }
+}
+
+/// The name a save's game is known by, with the parts that vary between
+/// emulators removed: case, punctuation, and any parenthesised or bracketed
+/// group (region, revision, dump tags). "Madden NFL '94 (USA, Europe)" and
+/// "Madden NFL 94" both reduce to `maddennfl94`.
+fn save_name_identity(path: &std::path::Path) -> String {
+    let stem = filename_stem(path).to_ascii_lowercase();
+    let mut out = String::with_capacity(stem.len());
+    let mut depth = 0usize;
+    for ch in stem.chars() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && ch.is_ascii_alphanumeric() => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A save this helper has already synced, with the same content, for the same
+/// game, in the same slot, under a name that differs only in the way emulators
+/// spell names. The name check is what keeps two different games that both
+/// wrote a blank save from being collapsed into one.
+fn save_already_synced_under_another_name<'a>(
+    known_saves: &'a HashMap<String, SyncedEntry>,
+    save_path: &std::path::Path,
+    system_slug: &str,
+    slot_name: &str,
+    sha256: &str,
+) -> Option<(&'a str, &'a SyncedEntry)> {
+    let identity = save_name_identity(save_path);
+    let current = save_path.to_string_lossy();
+    known_saves.iter().find_map(|(path, entry)| {
+        if path == current.as_ref() {
+            return None;
+        }
+        if entry.sha256 != sha256
+            || entry.system_slug.as_deref() != Some(system_slug)
+            || entry.slot_name.as_deref().unwrap_or("default") != slot_name
+        {
+            return None;
+        }
+        if save_name_identity(std::path::Path::new(path)) != identity {
+            return None;
+        }
+        Some((path.as_str(), entry))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

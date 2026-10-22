@@ -2734,3 +2734,136 @@ fn a_mister_system_is_sent_by_the_name_the_server_knows() {
         "a PC Engine upload did not name the system the server knows: {stdout}\nSTDERR: {stderr}"
     );
 }
+
+fn rename_helper() -> Command {
+    Command::cargo_bin("sgm-windows-helper").unwrap()
+}
+
+// RetroDECK writes one game's save under more than one name: "Madden NFL 94"
+// and "Madden NFL '94 (USA, Europe)" are the same cartridge, and the server
+// reads the second spelling as a new game at a size its table does not list,
+// so the authenticated upload is refused and retried every pass. A save whose
+// content this pass already synced for the same game under another spelling is
+// settled instead of uploaded -- but a different game with the same bytes is
+// still uploaded, because two blank saves are not one save.
+#[test]
+fn a_rename_of_a_synced_save_is_not_uploaded_again() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_rename","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"rename@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"madden-sha1","md5":"md5v","fileName":"madden.rom"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(
+                r#"{"success":true,"save":{"id":"save-madden","sha256":"sha-madden","version":1}}"#,
+            );
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Sega/Genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let short = root.join("Sega/Genesis/Madden NFL 94.srm");
+    fs::write(&short, vec![0xC7u8; 2114]).unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    rename_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("rename@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+
+    let first = rename_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    assert_eq!(
+        upload.calls(),
+        1,
+        "the first copy was not uploaded: {}\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    // The emulator now writes the same save under its full, region-tagged name.
+    fs::write(
+        root.join("Sega/Genesis/Madden NFL '94 (USA, Europe).srm"),
+        vec![0xC7u8; 2114],
+    )
+    .unwrap();
+    let second = rename_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let second_stdout = String::from_utf8_lossy(&second.stdout);
+    let second_stderr = String::from_utf8_lossy(&second.stderr);
+    assert_eq!(
+        upload.calls(),
+        1,
+        "the renamed copy was uploaded as a second game:\n{second_stdout}\n{second_stderr}"
+    );
+    // Both spellings settle against each other -- neither is uploaded, and on
+    // the next pass neither asks again.
+    assert!(
+        second_stdout.contains("duplicate_ignored=2"),
+        "the rename was skipped without being counted:\n{second_stdout}\n{second_stderr}"
+    );
+    assert!(
+        second_stderr.contains("under another name"),
+        "the skip does not say why:\n{second_stderr}"
+    );
+
+    // A different game that happens to hold the same bytes is not the same save.
+    fs::write(
+        root.join("Sega/Genesis/Sonic the Hedgehog.srm"),
+        vec![0xC7u8; 2114],
+    )
+    .unwrap();
+    let third = rename_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    assert_eq!(
+        upload.calls(),
+        2,
+        "a different game holding the same bytes was collapsed into another game's save:\n{}\n{}",
+        String::from_utf8_lossy(&third.stdout),
+        String::from_utf8_lossy(&third.stderr)
+    );
+}
+
