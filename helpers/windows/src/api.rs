@@ -575,7 +575,10 @@ impl ApiClient {
                 request = request.query(&[("filename", context.filename.trim())]);
             }
             if !context.system_slug.trim().is_empty() {
-                request = request.query(&[("system", context.system_slug.trim())]);
+                request = request.query(&[(
+                    "system",
+                    crate::scanner::canonical_server_system_slug(&context.system_slug),
+                )]);
             }
             if !context.display_title.trim().is_empty() {
                 request = request.query(&[("displayTitle", context.display_title.trim())]);
@@ -634,7 +637,10 @@ impl ApiClient {
         if let Some(system_slug) = system_slug
             && !system_slug.trim().is_empty()
         {
-            form = form.text("system", system_slug.to_string());
+            form = form.text(
+                "system",
+                crate::scanner::canonical_server_system_slug(system_slug),
+            );
         }
         if let Some(wii_title_id) = wii_title_id
             && !wii_title_id.trim().is_empty()

@@ -99,6 +99,17 @@ pub struct RomIndexEntry {
     pub path: PathBuf,
 }
 
+/// The name the server knows a system by. A MiSTer core is called `tgfx16`
+/// locally and `pc-engine` canonically; sending the local name is how PC
+/// Engine saves were skipped as "not in this source's SYSTEMS list" while the
+/// list said `pc-engine`.
+pub fn canonical_server_system_slug(slug: &str) -> String {
+    match slug.trim().to_ascii_lowercase().as_str() {
+        "tgfx16" => "pc-engine".to_string(),
+        other => other.to_string(),
+    }
+}
+
 pub fn discover_save_files(roots: &[PathBuf], recursive: bool) -> Result<Vec<PathBuf>> {
     discover_files_with_extensions(roots, SAVE_EXTENSIONS, recursive)
 }
@@ -1360,13 +1371,16 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
         // DeSmuME writes a .dsv: the raw backup followed by a 122-byte footer,
         // so the file's own length is not a power of two. The backup it wraps
         // is, and that is the size the system's chips come in.
-        "nds" => match ext {
-            "dsv" => {
-                let backup = size.saturating_sub(DESMUME_FOOTER_SIZE as u64);
-                backup.is_power_of_two() && (512..=16_777_216).contains(&backup)
-            }
-            _ => size.is_power_of_two() && (512..=16_777_216).contains(&size),
-        },
+        // DeSmuME appends a 122-byte footer to the backup, and it does so for
+        // a `.sav` as readily as for a `.dsv` -- what the file contains decides,
+        // not the name it was given. A plain raw backup is a power of two; a
+        // container is that plus the footer.
+        "nds" => {
+            let backup = size.saturating_sub(DESMUME_FOOTER_SIZE as u64);
+            let plain = size.is_power_of_two() && (512..=16_777_216).contains(&size);
+            let wrapped = backup.is_power_of_two() && (512..=16_777_216).contains(&backup);
+            plain || wrapped
+        }
         // A title's save data is whatever size that title reserved, so there is
         // no enumerated table to match against. Without this arm every 3DS save
         // fell through to `false` and was dropped as unsupported, whatever its

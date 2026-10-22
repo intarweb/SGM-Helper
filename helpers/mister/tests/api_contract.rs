@@ -2573,3 +2573,187 @@ fn a_missing_dsv_is_restored_with_the_desmume_profile() {
     );
     assert!(missing.exists(), "the .dsv was not restored");
 }
+
+fn fork22_helper() -> Command {
+    Command::cargo_bin("sgm-mister-helper").unwrap()
+}
+
+// RetroDECK gives a Nintendo DS save whatever name RetroArch chose, and a
+// DeSmuME container turns up as a `.sav` as readily as a `.dsv`. The footer is
+// what makes it a container: the file's own length is not a power of two, but
+// the backup inside it is. Judged by the name alone the file was refused as an
+// unsupported size, and with no DeSmuME profile the server would have measured
+// the footer as part of the save.
+#[test]
+fn a_desmume_container_under_a_sav_name_uploads_as_desmume() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_sav","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"sav@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"sav123","md5":"md5v","fileName":"nsmb.rom"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST)
+            .path("/saves")
+            .body_includes("nds/desmume");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-sav","sha256":"sha-sav","version":1}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/nds")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("saves/nds/New Super Mario Bros. (USA).sav"),
+        vec![0xC5u8; 262144 + 122],
+    )
+    .unwrap();
+    let config = tmp.path().join("config-nds-sav.ini");
+    fs::write(
+        &config,
+        format!(
+            "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.nds]\nLABEL=\"nds\"\nKIND=\"mister-fpga\"\nPROFILE=\"mister\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"nds\"\n",
+            server.port(),
+            root.display(),
+            state_dir.display(),
+            root.join("saves").display(),
+            root.join("roms").display()
+        ),
+    )
+    .unwrap();
+
+    fork22_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("sav@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = fork22_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        upload.calls(),
+        1,
+        "a DeSmuME container under a .sav name was not uploaded as nds/desmume: {stdout}\nSTDERR: {stderr}"
+    );
+}
+
+// A MiSTer PC Engine core is called `tgfx16` locally, and the server knows the
+// system as `pc-engine`. Sending the local name made a save look like it
+// belonged to a system the source's own SYSTEMS list did not carry, so a PC
+// Engine save was skipped as out of policy and never reached the server.
+#[test]
+fn a_mister_system_is_sent_by_the_name_the_server_knows() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_pce","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"pce@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"pce123","md5":"md5v","fileName":"bonk.rom"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves").body_includes("pc-engine");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-pce","sha256":"sha-pce","version":1}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/tgfx16")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("saves/tgfx16/Bonk's Adventure (USA).sav"),
+        vec![0xC7u8; 2048],
+    )
+    .unwrap();
+    let config = tmp.path().join("config-pce.ini");
+    fs::write(
+        &config,
+        format!(
+            "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.pcengine]\nLABEL=\"pc engine\"\nKIND=\"mister-fpga\"\nPROFILE=\"mister\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"pc-engine\"\n",
+            server.port(),
+            root.display(),
+            state_dir.display(),
+            root.join("saves").display(),
+            root.join("roms").display()
+        ),
+    )
+    .unwrap();
+
+    fork22_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("pce@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = fork22_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        upload.calls(),
+        1,
+        "a PC Engine upload did not name the system the server knows: {stdout}\nSTDERR: {stderr}"
+    );
+}

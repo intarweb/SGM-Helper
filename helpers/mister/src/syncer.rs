@@ -11,8 +11,8 @@ use crate::api::{
 use crate::backend_config::sync_config_with_backend;
 use crate::config::AppConfig;
 use crate::scanner::{
-    RomIndexEntry, SaveAdapterProfile, SaveContainerFormat, classify_supported_save,
-    discover_rom_index, discover_save_files, dreamcast_skip_reason,
+    RomIndexEntry, SaveAdapterProfile, SaveContainerFormat, canonical_server_system_slug,
+    classify_supported_save, discover_rom_index, discover_save_files, dreamcast_skip_reason,
     encode_download_for_local_container, filename_stem, is_mame_nvram_component,
     is_n64_retroarch_bundle, mame_nvram_machine, md5_file, n64_controller_pak_entry_count,
     normalize_save_bytes_for_sync, normalize_save_for_sync, saturn_skip_reason, sha1_file,
@@ -685,13 +685,15 @@ fn carries_save_scoped_refusal(message: &str) -> bool {
 }
 
 fn source_allows_system(source_systems: &[String], system_slug: &str) -> bool {
-    let clean = system_slug.trim().to_ascii_lowercase();
+    // Both sides are compared as the server names them: a source's SYSTEMS
+    // list comes from the server, and `tgfx16` there would be `pc-engine`.
+    let clean = canonical_server_system_slug(system_slug);
     if clean.is_empty() {
         return false;
     }
-    source_systems
-        .iter()
-        .any(|system| system == "*" || system.eq_ignore_ascii_case(&clean))
+    source_systems.iter().any(|system| {
+        system == "*" || canonical_server_system_slug(system).eq_ignore_ascii_case(&clean)
+    })
 }
 
 fn target_parent_allowed(
@@ -862,6 +864,7 @@ fn restore_single_cloud_save(
     let runtime_target = runtime_target_needs_dsv_profile(
         &system_slug,
         &cloud_restore_filename(cloud_save, None),
+        cloud_save.latest_size_bytes.or(cloud_save.file_size),
         runtime_target_for_system(source_kind, &effective_profile, &system_slug, device_type),
     );
     if verbose {
@@ -1696,7 +1699,12 @@ fn process_single_save(
     // bundle does -- otherwise the file is measured with the footer and
     // refused as an unrecognised size.
     if let Some(filename) = save_path.file_name().and_then(|value| value.to_str()) {
-        runtime_target = runtime_target_needs_dsv_profile(&system_slug, filename, runtime_target);
+        runtime_target = runtime_target_needs_dsv_profile(
+            &system_slug,
+            filename,
+            Some(normalized_save.canonical_bytes.len() as u64),
+            runtime_target,
+        );
     }
 
     let mut rom_sha1 = if is_playstation_system(&system_slug) {
@@ -2483,6 +2491,7 @@ fn process_missing_save(
     let runtime_target = runtime_target_needs_dsv_profile(
         system_slug,
         &save_path.to_string_lossy(),
+        std::fs::metadata(save_path).ok().map(|meta| meta.len()),
         runtime_target_for_system(source_kind, &effective_profile, system_slug, device_type),
     );
 
@@ -2683,15 +2692,27 @@ fn runtime_target_for_system(
 fn runtime_target_needs_dsv_profile(
     system_slug: &str,
     filename: &str,
+    payload_size: Option<u64>,
     target: RuntimeTarget,
 ) -> RuntimeTarget {
-    if system_slug == "nds"
-        && std::path::Path::new(filename)
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("dsv"))
-            .unwrap_or(false)
-    {
+    if system_slug != "nds" {
+        return target;
+    }
+    let ext_is_dsv = std::path::Path::new(filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("dsv"))
+        .unwrap_or(false);
+    // A `.sav` holding the backup plus DeSmuME's 122-byte footer is the same
+    // container under another name, and the server strips the footer by
+    // profile. A size that is a power of two plus the footer says so.
+    let wrapped = payload_size
+        .map(|size| {
+            let backup = size.saturating_sub(122);
+            !size.is_power_of_two() && backup.is_power_of_two() && backup >= 512
+        })
+        .unwrap_or(false);
+    if ext_is_dsv || wrapped {
         return runtime_target_for_profile(system_slug, "nds/desmume");
     }
     target

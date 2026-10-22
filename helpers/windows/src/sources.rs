@@ -9,7 +9,10 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use walkdir::WalkDir;
 
 use crate::config::AppConfig;
-use crate::scanner::{classify_supported_save, discover_save_files, known_save_extensions};
+use crate::scanner::{
+    canonical_server_system_slug, classify_supported_save, discover_save_files,
+    known_save_extensions,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -47,6 +50,7 @@ const ALL_SYNC_SYSTEMS: &[&str] = &[
     "ps3",
     "ps4",
     "ps5",
+    "pc-engine",
     "3ds",
 ];
 
@@ -64,6 +68,7 @@ const MISTER_SYNC_SYSTEMS: &[&str] = &[
     "saturn",
     "neogeo",
     "psx",
+    "pc-engine",
 ];
 
 impl SourceKind {
@@ -226,11 +231,15 @@ fn normalize_system_slug(value: &str) -> Option<String> {
         "ps4" | "playstation4" => "ps4",
         "ps5" | "playstation5" => "ps5",
         _ => {
+            // A MiSTer core is named after its hardware (`tgfx16`), the server
+            // names the system (`pc-engine`), and a source may be configured
+            // with either. Keep the name the server knows.
             let candidate = token.split_whitespace().collect::<Vec<_>>().join("-");
-            if ALL_SYNC_SYSTEMS.contains(&candidate.as_str())
-                || MISTER_SYNC_SYSTEMS.contains(&candidate.as_str())
+            let canonical = canonical_server_system_slug(&candidate);
+            if ALL_SYNC_SYSTEMS.contains(&canonical.as_str())
+                || MISTER_SYNC_SYSTEMS.contains(&canonical.as_str())
             {
-                return Some(candidate);
+                return Some(canonical);
             }
             return None;
         }
@@ -958,7 +967,12 @@ fn evaluate_candidates(candidates: Vec<CandidatePath>) -> Vec<EvaluatedCandidate
         let allowed_systems = default_systems_for_kind(&candidate.kind);
         let systems: Vec<String> = systems
             .into_iter()
-            .filter(|system| allowed_systems.contains(system))
+            .filter(|system| {
+                let canonical = canonical_server_system_slug(system);
+                allowed_systems
+                    .iter()
+                    .any(|allowed| canonical_server_system_slug(allowed) == canonical)
+            })
             .collect();
         if systems.is_empty() {
             continue;
