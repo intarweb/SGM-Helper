@@ -67,6 +67,9 @@ const SATURN_COMBINED_INTERLEAVED_SIZE: usize =
 const SATURN_INTERNAL_BLOCK_SIZE: usize = 0x40;
 const SATURN_CARTRIDGE_BLOCK_SIZE: usize = 0x200;
 const SATURN_ARCHIVE_ENTRY_MARKER: u32 = 0x8000_0000;
+/// DeSmuME appends a marker and a 40-byte footer to the raw backup.
+const DESMUME_FOOTER_SIZE: usize = 122;
+
 const N64_RETROARCH_SRM_SIZE: u64 = 0x48800;
 
 /// True for the single file mupen64plus-next writes for an N64 game, which
@@ -1354,7 +1357,16 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
             "srm" => size == N64_RETROARCH_SRM_SIZE,
             _ => false,
         },
-        "nds" => size.is_power_of_two() && (512..=16_777_216).contains(&size),
+        // DeSmuME writes a .dsv: the raw backup followed by a 122-byte footer,
+        // so the file's own length is not a power of two. The backup it wraps
+        // is, and that is the size the system's chips come in.
+        "nds" => match ext {
+            "dsv" => {
+                let backup = size.saturating_sub(DESMUME_FOOTER_SIZE as u64);
+                backup.is_power_of_two() && (512..=16_777_216).contains(&backup)
+            }
+            _ => size.is_power_of_two() && (512..=16_777_216).contains(&size),
+        },
         // A title's save data is whatever size that title reserved, so there is
         // no enumerated table to match against. Without this arm every 3DS save
         // fell through to `false` and was dropped as unsupported, whatever its

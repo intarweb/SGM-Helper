@@ -1679,6 +1679,13 @@ fn process_single_save(
     if system_slug == "n64" && is_n64_retroarch_bundle(save_path) {
         runtime_target = runtime_target_for_profile(&system_slug, "n64/retroarch");
     }
+    // A .dsv is DeSmuME's container. The server strips its footer only for
+    // that profile, so the container decides the profile the same way the N64
+    // bundle does -- otherwise the file is measured with the footer and
+    // refused as an unrecognised size.
+    if system_slug == "nds" && save_extension(save_path).as_deref() == Some("dsv") {
+        runtime_target = runtime_target_for_profile(&system_slug, "nds/desmume");
+    }
 
     let mut rom_sha1 = if is_playstation_system(&system_slug) {
         Some(playstation_line_key(
