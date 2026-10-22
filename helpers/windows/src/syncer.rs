@@ -50,6 +50,14 @@ pub struct SyncReport {
     /// `skipped`, which also holds saves with nothing to do, and apart from
     /// `errors`, which holds refusals and failures on every other system.
     pub rejected_n64_controller_pak: usize,
+    /// An arcade download whose payload is a different size from the component
+    /// file it would replace. A MAME component's size is fixed by the device it
+    /// belongs to, so a mismatch means the record describes a different
+    /// component or machine. The local save is kept and the refusal reported.
+    pub refused_size_mismatch: usize,
+    /// An arcade upload refused because every component of the machine holds
+    /// the same bytes -- the shape a fan-out corruption leaves behind.
+    pub refused_flattened_components: usize,
     /// The server answered 2xx but returned no save, so nothing was stored.
     pub accepted_not_stored: usize,
     /// Saves the server refused permanently. Not re-attempted until the
@@ -1498,6 +1506,21 @@ fn process_single_save(
         );
         return Ok(None);
     }
+    if system_slug == "arcade"
+        && arcade_machine_components_are_identical(save_path, &normalized_save.canonical_bytes)
+    {
+        // Every component of a machine holding the same bytes is what a
+        // fan-out corruption leaves behind. Uploading it would publish the
+        // damage to every device that restores the machine.
+        report.refused_flattened_components += 1;
+        eprintln!(
+            "Refusing to upload {}: every component of this machine holds the same {} bytes, which is a corruption signal, not a save",
+            save_path.display(),
+            normalized_save.canonical_bytes.len()
+        );
+        return Ok(None);
+    }
+
     let local_sha = sha256_bytes(&normalized_save.canonical_bytes);
     if verbose {
         eprintln!(
@@ -2048,6 +2071,25 @@ fn process_single_save(
             normalized_save.local_container,
             Some(canonical_bytes.len() as u64),
         );
+        if system_slug == "arcade"
+            && let Ok(existing) = std::fs::metadata(&target_save_path)
+            && existing.is_file()
+            && existing.len() != local_bytes.len() as u64
+        {
+            // A component's size is a property of its device. A payload of a
+            // different size is a different component (or another machine's
+            // save), and writing it would replace real data with the wrong
+            // save at the wrong length.
+            report.refused_size_mismatch += 1;
+            eprintln!(
+                "Refusing to write record {} ({} bytes) over {} ({} bytes): an arcade component keeps its size, so this payload belongs to a different component or machine",
+                save_id,
+                local_bytes.len(),
+                target_save_path.display(),
+                existing.len()
+            );
+            return Ok(None);
+        }
         if let Some(parent) = target_save_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("kan map niet maken: {}", parent.display()))?;
@@ -2070,9 +2112,11 @@ fn process_single_save(
         report.downloaded += 1;
         if verbose {
             eprintln!(
-                "Downloaded canonical save for {} and wrote local container {}",
+                "Downloaded canonical save for {} and wrote local container {} (record {}, {} bytes)",
                 target_save_path.display(),
-                normalized_save.local_container.as_str()
+                normalized_save.local_container.as_str(),
+                save_id,
+                local_bytes.len()
             );
         }
 
@@ -2915,6 +2959,35 @@ fn save_extension(path: &Path) -> Option<String> {
 
 fn is_native_n64_extension(extension: Option<&str>) -> bool {
     matches!(extension, Some("eep" | "fla" | "sra" | "mpk" | "cpk"))
+}
+
+/// True when every component file of the machine holding `save_path` carries
+/// the same bytes as `bytes`. MAME components are independent devices; when
+/// they all read identically, one payload was written over the set.
+fn arcade_machine_components_are_identical(save_path: &Path, bytes: &[u8]) -> bool {
+    let Some(parent) = save_path.parent() else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return false;
+    };
+    let mut total = 0usize;
+    let mut identical = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        total += 1;
+        if path == save_path
+            || std::fs::read(&path)
+                .map(|other| other == bytes)
+                .unwrap_or(false)
+        {
+            identical += 1;
+        }
+    }
+    total > 1 && identical == total
 }
 
 fn upload_filename_for_sync(save_path: &Path, system_slug: &str) -> String {

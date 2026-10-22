@@ -250,7 +250,8 @@ fn backend_forced_dry_run_marks_the_summary_and_uploads_nothing() {
     );
     assert!(
         stdout.contains(
-            "skipped=1 rejected_n64_controller_pak=0 accepted_not_stored=0 \
+            "skipped=1 rejected_n64_controller_pak=0 refused_size_mismatch=0 \
+             refused_flattened_components=0 accepted_not_stored=0 \
              rejected_permanent=0 errors=0 would_upload=1 would_download=0"
         ),
         "a skipped save was counted as a simulated upload, or the simulation was missed: {stdout}"
@@ -1524,5 +1525,207 @@ fn a_combined_n64_save_uploads_with_the_retroarch_profile() {
     assert!(
         upload.calls() >= 1,
         "the combined N64 save was not uploaded with the retroarch profile; sync said: {stdout}"
+    );
+}
+
+fn arcade_config(
+    tmp: &tempfile::TempDir,
+    server: &MockServer,
+    root: &std::path::Path,
+    state_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    let config_path = tmp.path().join("config-arcade.ini");
+    let body = format!(
+        "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.arcade]\nLABEL=\"Arcade nvram\"\nKIND=\"mister-fpga\"\nPROFILE=\"mister\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"arcade\"\n",
+        server.port(),
+        root.display(),
+        state_dir.display(),
+        root.join("nvram").display(),
+        root.join("roms").display()
+    );
+    fs::write(&config_path, body).unwrap();
+    config_path
+}
+
+fn arcade_login(binary: &str, config: &std::path::Path) {
+    Command::cargo_bin(binary)
+        .unwrap()
+        .arg("--config")
+        .arg(config)
+        .arg("login")
+        .arg("--email")
+        .arg("arcade@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+}
+
+fn arcade_sync(binary: &str, config: &std::path::Path) -> String {
+    let output = Command::cargo_bin(binary)
+        .unwrap()
+        .arg("--config")
+        .arg(config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "sync failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn arcade_common_mocks(server: &MockServer) {
+    let _ = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_arcade","expiresInDays":7}"#);
+    });
+    let _ = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"arcade@example.com"}}"#);
+    });
+    let _ = server.mock(|when, then| {
+        when.method(GET)
+            .path("/rom/lookup")
+            .query_param("filenameStem", "galaga");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"arc123","md5":"md5v","fileName":"galaga.zip"}}"#);
+    });
+    let _ = server.mock(|when, then| {
+        when.method(POST).path("/helpers/config/sync");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"accepted":true}"#);
+    });
+    let _ = server.mock(|when, then| {
+        when.method(GET).path("/conflicts/check");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false}"#);
+    });
+}
+
+// A MAME component's size is a property of its device: a 128-byte eeprom and
+// an 8192-byte eeprom belong to different machines. A cloud payload of the
+// wrong size for the file it would replace is another component's save, and
+// writing it destroys the local one. The refusal is counted and named,
+// because a MAME update can legitimately resize a component and the operator
+// has to see that instead of a silent skip.
+#[test]
+fn a_download_that_changes_a_components_size_is_refused() {
+    let binary = "sgm-windows-helper";
+    let server = MockServer::start();
+    arcade_common_mocks(&server);
+    let _latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":true,"sha256":"sha-cloud","version":9,"id":"save-cloud"}"#);
+    });
+    let download = server.mock(|when, then| {
+        when.method(GET).path("/saves/download");
+        then.status(200)
+            .header("content-type", "application/octet-stream")
+            .body(vec![0x5Au8; 8192]);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("nvram/galaga")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let local = root.join("nvram/galaga/eeprom");
+    let local_bytes = vec![0x11u8; 128];
+    fs::write(&local, &local_bytes).unwrap();
+
+    let config = arcade_config(&tmp, &server, &root, &state_dir);
+    arcade_login(binary, &config);
+    let output = arcade_sync(binary, &config);
+
+    assert_eq!(
+        download.calls(),
+        1,
+        "the cloud save was not fetched: {output}"
+    );
+    assert_eq!(
+        fs::read(&local).unwrap(),
+        local_bytes,
+        "the component was overwritten with a payload of the wrong size: {output}"
+    );
+    assert!(
+        output.contains("refused_size_mismatch=1"),
+        "the refusal is not counted in the summary: {output}"
+    );
+    assert!(
+        output.contains("8192") && output.contains("128"),
+        "the refusal does not name both sizes: {output}"
+    );
+    assert!(
+        output.contains("save-cloud"),
+        "the refusal does not name the record that was refused: {output}"
+    );
+}
+
+// Every component of a machine holding identical bytes is what a fan-out
+// corruption leaves behind: real chips are different devices with different
+// contents. Uploading that set publishes the damage to every device that
+// later restores the machine.
+#[test]
+fn a_machine_whose_components_are_all_identical_is_not_uploaded() {
+    let binary = "sgm-windows-helper";
+    let server = MockServer::start();
+    arcade_common_mocks(&server);
+    let _latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-arc","sha256":"sha-arc","version":1}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("nvram/galaga")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    // Not printable: an extensionless nvram component that reads as text is
+    // not discovered as a save at all.
+    let shared = vec![0xA5u8; 2048];
+    fs::write(root.join("nvram/galaga/eeprom"), &shared).unwrap();
+    fs::write(root.join("nvram/galaga/game"), &shared).unwrap();
+    fs::write(root.join("nvram/galaga/ioasic"), &shared).unwrap();
+
+    let config = arcade_config(&tmp, &server, &root, &state_dir);
+    arcade_login(binary, &config);
+    let output = arcade_sync(binary, &config);
+
+    assert_eq!(
+        upload.calls(),
+        0,
+        "a flattened component set was uploaded: {output}"
+    );
+    assert!(
+        output.contains("refused_flattened_components=3"),
+        "the refusal is not counted for every component: {output}"
+    );
+    assert!(
+        output.contains("corruption signal"),
+        "the refusal does not say why: {output}"
     );
 }
