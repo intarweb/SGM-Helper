@@ -80,7 +80,6 @@ pub struct SyncReport {
 fn settle_upload(
     report: &mut SyncReport,
     path: &std::path::Path,
-    local_sha: &str,
     bytes: usize,
     record_id: Option<&str>,
     duplicate: bool,
@@ -95,9 +94,14 @@ fn settle_upload(
         // The server kept its own copy and answers the same way every pass.
         // Asking again only re-arms the pass and churns both logs.
         report.duplicate_ignored += 1;
-        report
-            .duplicate_pending
-            .push((path.to_string_lossy().to_string(), local_sha.to_string()));
+        // Remember the file's own hash: the next pass reads the file, and an
+        // adapter's canonical payload is not the bytes on disk.
+        let file_sha = sha256_file(path).unwrap_or_default();
+        if !file_sha.is_empty() {
+            report
+                .duplicate_pending
+                .push((path.to_string_lossy().to_string(), file_sha));
+        }
         return;
     }
     report.uploaded += 1;
@@ -1728,7 +1732,6 @@ fn process_port_save(
         settle_upload(
             report,
             Path::new(&filename),
-            &local_sha,
             bytes.len(),
             None,
             response.declined_duplicate(),
@@ -2221,7 +2224,6 @@ fn process_single_save(
         settle_upload(
             report,
             save_path,
-            &local_sha,
             normalized_save.canonical_bytes.len(),
             upload_id.as_deref(),
             duplicate_uploaded,
@@ -2320,7 +2322,6 @@ fn process_single_save(
         settle_upload(
             report,
             save_path,
-            &local_sha,
             normalized_save.canonical_bytes.len(),
             upload_id.as_deref(),
             duplicate_uploaded,
@@ -2411,7 +2412,6 @@ fn process_single_save(
             settle_upload(
                 report,
                 save_path,
-                &local_sha,
                 normalized_save.canonical_bytes.len(),
                 None,
                 response.declined_duplicate(),
@@ -2477,7 +2477,6 @@ fn process_single_save(
                 settle_upload(
                     report,
                     save_path,
-                    &local_sha,
                     normalized_save.canonical_bytes.len(),
                     None,
                     response.declined_duplicate(),
@@ -2578,7 +2577,6 @@ fn process_single_save(
                 settle_upload(
                     report,
                     save_path,
-                    &local_sha,
                     normalized_save.canonical_bytes.len(),
                     None,
                     response.declined_duplicate(),

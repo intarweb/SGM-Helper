@@ -2049,3 +2049,88 @@ fn a_duplicate_the_server_declines_is_not_uploaded_again() {
         "the second pass did not report the duplicate as settled: {stdout}"
     );
 }
+
+// An adapter rewrites the payload on the way out: a `.gme` card goes up as a
+// raw 128 KiB card, so the canonical hash and the file's own hash differ. A
+// duplicate settled against the canonical hash would never match the file on
+// the next pass and would upload forever -- the loop this is meant to stop,
+// alive exactly on the formats that transform.
+#[test]
+fn a_duplicate_on_a_converted_save_is_not_uploaded_again() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_gme","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"gme@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"ps1sha","md5":"ps1md5","fileName":"card.rom"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"duplicate":true,"duplicateDisposition":"ignored-latest","save":{"id":"save-gme","sha256":"sha-cloud","version":2},"success":true}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Sony/PSX")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let raw = build_valid_ps1_memcard();
+    fs::write(root.join("Sony/PSX/ff7.gme"), encode_ps1_dexdrive(&raw)).unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    Command::cargo_bin("sgm-mister-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("gme@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    Command::cargo_bin("sgm-mister-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .assert()
+        .success();
+    let after_first = upload.calls();
+    assert_eq!(after_first, 1, "the first pass did not upload the card");
+
+    let output = Command::cargo_bin("sgm-mister-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        upload.calls(),
+        after_first,
+        "a converted save the server already held was uploaded again: {stdout}\nSTDERR: {stderr}"
+    );
+}

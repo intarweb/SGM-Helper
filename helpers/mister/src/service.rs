@@ -212,7 +212,7 @@ pub fn run_service(
                             report.refused_flattened_components,
                             report.accepted_not_stored,
                             report.rejected_permanent,
-                    report.duplicate_ignored,
+                            report.duplicate_ignored,
                             report.errors,
                             report.would_upload,
                             report.would_download
