@@ -705,11 +705,15 @@ pub fn default_source(config: &AppConfig, kind: SourceKind) -> Result<Source> {
             vec![root.clone()],
             true,
         ),
+        // No ROM root: the save root is the only directory a default knows
+        // about, and using it for both indexed save files as ROMs and logged a
+        // missing ROM root on every pass. A ROM lookup without an index falls
+        // back to the server, which is what it does for an unknown stem anyway.
         SourceKind::Windows => Source::new(
             "default-windows".to_string(),
             SourceKind::Windows,
             vec![root.clone()],
-            vec![root.clone()],
+            Vec::new(),
             true,
         ),
         SourceKind::SteamDeck => {
@@ -726,7 +730,7 @@ pub fn default_source(config: &AppConfig, kind: SourceKind) -> Result<Source> {
                     "default-steamdeck".to_string(),
                     SourceKind::SteamDeck,
                     vec![root.clone()],
-                    vec![root],
+                    Vec::new(),
                     true,
                 )
             }
@@ -735,7 +739,7 @@ pub fn default_source(config: &AppConfig, kind: SourceKind) -> Result<Source> {
             "default-custom".to_string(),
             SourceKind::Custom,
             vec![root.clone()],
-            vec![root],
+            Vec::new(),
             true,
         ),
     };
