@@ -1729,3 +1729,198 @@ fn a_machine_whose_components_are_all_identical_is_not_uploaded() {
         "the refusal does not say why: {output}"
     );
 }
+
+// The live refusal names the save twice -- a generic `message` and a specific
+// `reason` -- and carries the status code. A longer body is not a different
+// kind of refusal, but the error text is truncated when recorded, so a body
+// that is cut mid-string parses as nothing and the save is retried forever.
+#[test]
+fn a_long_blank_refusal_is_still_permanent() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_blank","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"blank@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"blank123","md5":"md5v","fileName":"goldensun.srm"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(422)
+            .header("content-type", "application/json")
+            .body(r#"{"error":"Unprocessable Entity","message":"unsupported or unrecognized save format; only known consoles/arcade are allowed","reason":"gba raw save payload is blank (all 0xFF)","statusCode":422}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Nintendo/Game Boy Advance")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("Nintendo/Game Boy Advance/Golden Sun.srm"),
+        vec![0xFFu8; 65536],
+    )
+    .unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("blank@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+
+    Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .assert()
+        .success();
+    let first_calls = upload.calls();
+
+    let output = Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "second sync failed: {stdout}");
+    assert!(
+        stdout.contains("rejected_permanent=1") && stdout.contains("errors=0"),
+        "a blank refusal was retried instead of held as permanent: {stdout}"
+    );
+    assert_eq!(
+        upload.calls(),
+        first_calls,
+        "the blank save was uploaded again on the second pass: {stdout}"
+    );
+}
+
+// The Steam Machine's own shape: a RetroArch source rooted at
+// saves/, a gba file under saves/gba, and the server's blank refusal. The
+// refusal has to land in the state file, or every pass re-uploads it.
+#[test]
+fn a_blank_refusal_from_a_retroarch_source_is_held_permanently() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_blank","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"blank@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"blank123","md5":"md5v","fileName":"goldensun.srm"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(422)
+            .header("content-type", "application/json")
+            .body(r#"{"error":"Unprocessable Entity","message":"unsupported or unrecognized save format; only known consoles/arcade are allowed","reason":"gba raw save payload is blank (all 0xFF)","statusCode":422}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/gba")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("saves/gba/Golden Sun (USA, Europe).srm"),
+        vec![0xFFu8; 65536],
+    )
+    .unwrap();
+
+    let config_path = tmp.path().join("config.ini");
+    let body = format!(
+        "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\r\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.retroarch]\nLABEL=\"retroarch steamdeck\"\nKIND=\"retroarch\"\nPROFILE=\"retroarch\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"gba\"\n",
+        server.port(),
+        root.display(),
+        state_dir.display(),
+        root.join("saves").display(),
+        root.join("roms").display()
+    );
+    fs::write(&config_path, body).unwrap();
+
+    Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config_path)
+        .arg("login")
+        .arg("--email")
+        .arg("blank@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config_path)
+        .arg("sync")
+        .assert()
+        .success();
+
+    let state = fs::read_to_string(state_dir.join("sync_state.json")).unwrap();
+    assert!(
+        state.contains("terminal_rejections"),
+        "the refusal never reached the state file: {state}"
+    );
+
+    let first_calls = upload.calls();
+    let output = Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config_path)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("rejected_permanent=1") && stdout.contains("errors=0"),
+        "the blank save was retried: {stdout}"
+    );
+    assert_eq!(
+        upload.calls(),
+        first_calls,
+        "the blank save was uploaded again"
+    );
+}

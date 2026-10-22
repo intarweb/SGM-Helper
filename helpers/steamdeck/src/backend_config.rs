@@ -487,15 +487,32 @@ fn write_backend_policy_to_config(
         return Ok(());
     }
 
-    let backup = backup_config_if_exists(&config.config_path)?;
     let existing = read_file_if_exists(&config.config_path)?;
     let global_updates = collect_global_writeback(response);
     let with_globals = apply_global_writeback_to_ini(&existing, &global_updates);
-    write_file(&config.config_path, &with_globals)?;
 
-    let mut store = load_source_store(&config.config_path)?;
+    // Render the result beside the live config first. The backend policy is
+    // re-sent every sync cycle, so a snapshot and a write on each one fills
+    // the device with identical copies; only a change is worth either.
+    let candidate_path = config.config_path.with_extension("ini.candidate");
+    write_file(&candidate_path, &with_globals)?;
+    let mut store = load_source_store(&candidate_path)?;
     apply_source_writeback(&mut store, response);
-    save_source_store(&config.config_path, &store)?;
+    save_source_store(&candidate_path, &store)?;
+    let candidate = read_file_if_exists(&candidate_path)?;
+    if candidate == existing {
+        let _ = fs::remove_file(&candidate_path);
+        return Ok(());
+    }
+
+    let backup = backup_config_if_exists(&config.config_path)?;
+    fs::rename(&candidate_path, &config.config_path).with_context(|| {
+        format!(
+            "kan config niet vervangen: {} -> {}",
+            candidate_path.display(),
+            config.config_path.display()
+        )
+    })?;
 
     if verbose {
         if let Some(backup) = backup {
@@ -1264,6 +1281,57 @@ mod tests {
         assert!(body.contains("SYSTEMS=\"none\""));
         let store = load_source_store(&config_path).unwrap();
         assert!(store.sources[0].systems.is_empty());
+    }
+
+    // A backend sync runs every cycle. Snapshotting the config on each one
+    // filled a device with hundreds of identical files within an hour, so a
+    // snapshot is written only when the policy actually changes the config.
+    #[test]
+    fn a_second_identical_backend_write_makes_no_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.ini");
+        fs::write(
+            &config_path,
+            "URL=\"192.168.2.10\"\nPORT=\"80\"\n\n[source.snes]\nLABEL=\"SNES\"\nKIND=\"retroarch\"\nSAVE_PATH=\"/saves\"\nROM_PATH=\"/roms\"\nRECURSIVE=\"true\"\nSYSTEMS=\"snes\"\nMANAGED=\"false\"\nORIGIN=\"manual\"\n",
+        )
+        .unwrap();
+        let config = test_config(&config_path, tmp.path());
+        let response: BackendConfigSyncResponse = serde_json::from_value(serde_json::json!({
+            "global": {"dryRun": false},
+            "sources": [{
+                "sourceId": "snes",
+                "systems": ["snes"],
+                "recursive": true
+            }]
+        }))
+        .unwrap();
+
+        write_backend_policy_to_config(&config, &response, false).unwrap();
+        let after_first = count_backend_backups(tmp.path());
+        assert_eq!(
+            after_first, 1,
+            "the first write did not snapshot the config"
+        );
+
+        write_backend_policy_to_config(&config, &response, false).unwrap();
+        assert_eq!(
+            count_backend_backups(tmp.path()),
+            after_first,
+            "an unchanged config was snapshotted again"
+        );
+    }
+
+    fn count_backend_backups(dir: &Path) -> usize {
+        fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".ini.backend.")
+            })
+            .count()
     }
 
     fn test_config(config_path: &Path, root: &Path) -> AppConfig {
