@@ -2153,6 +2153,26 @@ fn process_single_save(
         return Ok(None);
     };
 
+    if verbose {
+        // Which ROM the save was mapped to, and what was hashed for it. The
+        // server treats a missing rom_sha1 as a different upload shape, so a
+        // derivation that silently yields nothing changes server behaviour.
+        eprintln!(
+            "ROM mapping for {}: stem {:?}, index entry {}, rom_sha1 {}",
+            save_path.display(),
+            rom_stem,
+            if rom_entry_for_rom.is_some() {
+                "found"
+            } else {
+                "none"
+            },
+            match &active_rom_sha1 {
+                value if value.is_empty() => "EMPTY".to_string(),
+                value => value.clone(),
+            }
+        );
+    }
+
     let latest_context = latest_save_context(save_path, &system_slug);
     let latest = match api.latest_save(LatestSaveRequest {
         rom_sha1: &active_rom_sha1,
