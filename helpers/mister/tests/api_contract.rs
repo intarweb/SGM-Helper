@@ -1056,3 +1056,112 @@ fn sync_uploads_a_controller_pak_that_holds_a_note() {
         "a pak with a note in it was counted as empty: {stdout}"
     );
 }
+
+#[test]
+fn a_failed_config_fetch_keeps_the_last_backend_policy() {
+    // The server forced a dry run. If the next pass cannot reach the config
+    // endpoint, dropping the override would sync live -- failing open on the
+    // one setting that exists to stop writes.
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_policy","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"policy@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"pol123","md5":"md5v","fileName":"wario.sav"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let mut config_sync = server.mock(|when, then| {
+        when.method(POST).path("/helpers/config/sync");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"accepted":true,"global":{"dryRun":true}}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-pol","sha256":"sha-pol"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Nintendo/Game Boy")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("Nintendo/Game Boy/wario.sav"),
+        vec![0x00u8; 32768],
+    )
+    .unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    Command::cargo_bin("sgm-steamdeck-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("policy@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+
+    let first = Command::cargo_bin("sgm-steamdeck-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let first_stdout = String::from_utf8_lossy(&first.stdout);
+    assert!(
+        first_stdout.contains("Sync complete (DRY RUN)"),
+        "first pass should honour the forced dry run: {first_stdout}"
+    );
+
+    // The endpoint now fails. The policy it last sent has to survive.
+    config_sync.delete();
+    let _config_down = server.mock(|when, then| {
+        when.method(POST).path("/helpers/config/sync");
+        then.status(500)
+            .header("content-type", "application/json")
+            .body(r#"{"success":false}"#);
+    });
+
+    let second = Command::cargo_bin("sgm-steamdeck-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let second_stdout = String::from_utf8_lossy(&second.stdout);
+    let second_stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        second_stdout.contains("Sync complete (DRY RUN)"),
+        "a failed config fetch dropped the policy and synced live: {second_stdout}"
+    );
+    assert!(
+        second_stderr.contains("applying the last policy it sent"),
+        "the fallback was silent: {second_stderr}"
+    );
+    assert_eq!(upload.calls(), 0, "dry run must not upload");
+}

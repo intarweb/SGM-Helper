@@ -20,7 +20,9 @@ use crate::scanner::{
 };
 use crate::sources::{EmulatorProfile, SourceKind, prepare_sources_for_sync};
 use crate::state::{
-    AuthState, SyncedEntry, TerminalRejection, load_sync_state, now_rfc3339, save_sync_state,
+    AuthState, RememberedBackendPolicy, SyncedEntry, TerminalRejection,
+    load_remembered_backend_policy, load_sync_state, now_rfc3339, save_remembered_backend_policy,
+    save_sync_state,
 };
 
 #[derive(Debug, Clone)]
@@ -289,10 +291,36 @@ pub fn run_sync(
             if let Some(value) = overrides.dry_run {
                 effective_options.dry_run = value;
             }
+            // Remember what the server last told this device. A fetch that
+            // fails later must not turn a server-forced dry run into a live
+            // sync: that fails open on the one setting meant to stop writes.
+            let remembered = RememberedBackendPolicy {
+                force_upload: Some(effective_options.force_upload),
+                dry_run: Some(effective_options.dry_run),
+            };
+            if let Err(err) = save_remembered_backend_policy(&state_dir, &remembered)
+                && verbose
+            {
+                eprintln!("Could not remember backend policy: {:#}", err);
+            }
         }
         Err(err) => {
             if verbose {
                 eprintln!("Backend config sync skipped: {:#}", err);
+            }
+            // Apply what the server last said, and say so once. A device that
+            // has never had a policy keeps its local configuration.
+            if let Some(remembered) = load_remembered_backend_policy(&state_dir) {
+                if let Some(value) = remembered.force_upload {
+                    effective_options.force_upload = value;
+                }
+                if let Some(value) = remembered.dry_run {
+                    effective_options.dry_run = value;
+                }
+                eprintln!(
+                    "Backend config unavailable; applying the last policy it sent (dry_run={} force_upload={})",
+                    effective_options.dry_run, effective_options.force_upload
+                );
             }
         }
     }

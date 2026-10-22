@@ -90,6 +90,34 @@ pub fn sync_state_path(state_dir: &Path) -> PathBuf {
     state_dir.join("sync_state.json")
 }
 
+/// The last backend policy this device received, so a failed fetch cannot
+/// silently drop a server-forced dry run and sync live.
+pub fn backend_policy_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("backend_policy.json")
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct RememberedBackendPolicy {
+    #[serde(default)]
+    pub force_upload: Option<bool>,
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+}
+
+pub fn load_remembered_backend_policy(state_dir: &Path) -> Option<RememberedBackendPolicy> {
+    let raw = fs::read_to_string(backend_policy_path(state_dir)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+pub fn save_remembered_backend_policy(
+    state_dir: &Path,
+    policy: &RememberedBackendPolicy,
+) -> Result<()> {
+    let raw = serde_json::to_string_pretty(policy)?;
+    fs::write(backend_policy_path(state_dir), raw)?;
+    Ok(())
+}
+
 pub fn load_auth_state(state_dir: &Path) -> Result<Option<AuthState>> {
     load_json_or_reset::<AuthState>(&auth_path(state_dir))
 }
