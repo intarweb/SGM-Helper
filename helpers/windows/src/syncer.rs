@@ -1214,17 +1214,37 @@ fn restore_single_cloud_save(
     restored_targets.insert(target_key);
     report.downloaded += 1;
 
-    if verbose {
-        eprintln!(
-            "Restored cloud-only {} save '{}' to {} using profile {}",
-            system_slug,
-            cloud_save.display_name(),
-            target_path.display(),
-            runtime_profile.unwrap_or("original")
-        );
-    }
+    report_restore_write(
+        &system_slug,
+        cloud_save.display_name(),
+        &target_path,
+        local_bytes.len(),
+        runtime_profile,
+    );
 
     Ok(())
+}
+
+/// Say that a save was written to disk.
+///
+/// Every restore path prints this, on every run: a restore that writes a file
+/// and says nothing is indistinguishable from one that never ran, which is how
+/// an N64 bundle coming back correctly was reported as "prints nothing".
+fn report_restore_write(
+    system_slug: &str,
+    title: &str,
+    path: &Path,
+    bytes: usize,
+    profile: Option<&str>,
+) {
+    eprintln!(
+        "Restored {} save {:?} to {} ({} bytes, profile {})",
+        system_slug,
+        title,
+        path.display(),
+        bytes,
+        profile.unwrap_or("original")
+    );
 }
 
 fn supports_cloud_restore_system(system_slug: &str) -> bool {
@@ -3026,6 +3046,16 @@ fn process_single_save(
                 target_save_path.display()
             )
         })?;
+        report_restore_write(
+            &system_slug,
+            &filename_stem(save_path),
+            &target_save_path,
+            local_bytes.len(),
+            runtime_target
+                .system_profile_value
+                .as_deref()
+                .or(runtime_target.runtime_profile.as_deref()),
+        );
         if target_save_path != save_path && save_path.exists() {
             fs::remove_file(save_path).with_context(|| {
                 format!(
@@ -3323,14 +3353,16 @@ fn process_missing_save(
         )
     })?;
     report.downloaded += 1;
-    if verbose {
-        eprintln!(
-            "Restored missing save {} using adapter {} and container {}",
-            save_path.display(),
-            adapter_profile.as_str(),
-            local_container.as_str(),
-        );
-    }
+    report_restore_write(
+        system_slug,
+        &filename_stem(save_path),
+        save_path,
+        local_bytes.len(),
+        runtime_target
+            .system_profile_value
+            .as_deref()
+            .or(runtime_target.runtime_profile.as_deref()),
+    );
 
     Ok(Some(processed_entry(
         state_key,

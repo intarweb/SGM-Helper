@@ -4965,6 +4965,14 @@ fn an_n64_component_record_restores_as_the_bundle() {
         !root.join("saves/n64/GOLDENEYE.eep").exists(),
         "a component file was manufactured beside the bundle:\n{stderr}"
     );
+    // A restore that writes a file has to say so: the no-op case logged and the
+    // write case did not, which made a correct bundle restore look like nothing.
+    assert!(
+        stderr.contains("Restored n64 save \"GoldenEye 007\"")
+            && stderr.contains("GOLDENEYE.srm")
+            && stderr.contains("profile n64/retroarch"),
+        "the restore write was not reported:\n{stderr}"
+    );
 }
 
 // The self-perpetuating half: a directory that already holds the bundle gets no
