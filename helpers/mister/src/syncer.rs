@@ -2781,7 +2781,11 @@ fn runtime_target_for_system(
     system_slug: &str,
     device_type: &str,
 ) -> RuntimeTarget {
-    let clean_system = system_slug.trim().to_ascii_lowercase();
+    // The system is named the way the server names it: a MiSTer core is
+    // `tgfx16` locally and `pc-engine` on the wire, and the profile table is
+    // keyed on the server's name. Matching the local name sent no profile at
+    // all, and the server refuses a projection-capable system without one.
+    let clean_system = canonical_server_system_slug(system_slug);
     if clean_system.is_empty() {
         return RuntimeTarget::default();
     }
@@ -2856,7 +2860,11 @@ fn projection_runtime_profile_for_system(
         SourceKind::Windows | SourceKind::SteamDeck => "generic",
     };
 
-    match system_slug {
+    // The table is keyed by the server's name for a system. A caller holding
+    // the local core name (`tgfx16`) gets the same answer as one holding
+    // `pc-engine`.
+    let system_slug = canonical_server_system_slug(system_slug);
+    match system_slug.as_str() {
         "psx" => {
             let clean = device_type.trim().to_ascii_lowercase();
             if clean == "mister" {
@@ -4875,6 +4883,15 @@ mod runtime_profile_map {
                 EmulatorProfile::RetroArch,
                 "pc-engine/retroarch-beetle-pce",
             ),
+            // The slug the classifier actually produces for a MiSTer PC Engine
+            // save; the table is keyed on the server's name, so both have to
+            // answer the same way.
+            (
+                "tgfx16",
+                EmulatorProfile::RetroArch,
+                "pc-engine/retroarch-beetle-pce",
+            ),
+            ("tgfx16", EmulatorProfile::Mister, "pc-engine/mister"),
             (
                 "atari-jaguar",
                 EmulatorProfile::RetroArch,

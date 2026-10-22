@@ -2702,7 +2702,9 @@ fn a_mister_system_is_sent_by_the_name_the_server_knows() {
             .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
     });
     let upload = server.mock(|when, then| {
-        when.method(POST).path("/saves").body_includes("pc-engine");
+        when.method(POST)
+            .path("/saves")
+            .body_includes("pc-engine/mister");
         then.status(200)
             .header("content-type", "application/json")
             .body(r#"{"success":true,"save":{"id":"save-pce","sha256":"sha-pce","version":1}}"#);
@@ -3321,5 +3323,100 @@ fn an_unformatted_ps2_memory_card_says_why_it_is_refused() {
     assert!(
         stdout.contains("skipped_by_policy=1"),
         "the skip is not counted:\n{stdout}"
+    );
+}
+
+fn pce_helper() -> Command {
+    Command::cargo_bin("sgm-mister-helper").unwrap()
+}
+
+// A PC Engine save is classified as the MiSTer core's name, `tgfx16`, and the
+// server knows the system as `pc-engine` and requires a runtime profile for it.
+// No arm matched the local name, so the upload carried no profile and was
+// refused with "runtimeProfile is required for projection-capable helper
+// uploads" -- the last step between these saves and the store.
+#[test]
+fn a_pc_engine_upload_declares_its_runtime_profile() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_pce","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"pce@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"pce-rom-sha1","md5":"md5v","fileName":"bomberman.rom"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST)
+            .path("/saves")
+            .body_includes("pc-engine/retroarch-beetle-pce");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-pce","sha256":"sha-pce","version":1}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/pcengine")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("saves/pcengine/Bomberman '93 (USA).srm"),
+        vec![0xA5u8; 2048],
+    )
+    .unwrap();
+    let config = tmp.path().join("config-pce.ini");
+    fs::write(
+        &config,
+        format!(
+            "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.retrodeck]\nLABEL=\"RetroDeck\"\nKIND=\"retroarch\"\nPROFILE=\"retroarch\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"pc-engine\"\n",
+            server.port(),
+            root.display(),
+            state_dir.display(),
+            root.join("saves").display(),
+            root.join("roms").display()
+        ),
+    )
+    .unwrap();
+
+    pce_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("pce@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = pce_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        upload.calls(),
+        1,
+        "a PC Engine upload did not declare pc-engine/retroarch-beetle-pce:\n{stdout}\n{stderr}"
     );
 }
