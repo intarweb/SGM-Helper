@@ -283,7 +283,7 @@ pub fn saturn_skip_reason(save_path: &Path, rom_path: Option<&Path>) -> Option<S
         .map(|path| path.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
     let combined = format!("{} {}", save_lower, rom_lower);
-    let saturn_hint = contains_any(
+    let saturn_hint = contains_any_needle(
         &combined,
         &[
             "saturn",
@@ -349,7 +349,7 @@ pub fn ps2_skip_reason(save_path: &Path, rom_path: Option<&Path>) -> Option<Stri
         .map(|path| path.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
     let combined = format!("{} {}", save_lower, rom_lower);
-    if !contains_any(&combined, &["pcsx2", "/ps2/", "\\ps2\\", "playstation 2"]) {
+    if !contains_any_needle(&combined, &["pcsx2", "/ps2/", "\\ps2\\", "playstation 2"]) {
         return None;
     }
     if validate_ps2_memory_card_image(save_path) {
@@ -373,7 +373,7 @@ pub fn dreamcast_skip_reason(save_path: &Path, rom_path: Option<&Path>) -> Optio
         .map(|path| path.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
     let combined = format!("{} {}", save_lower, rom_lower);
-    let dreamcast_hint = contains_any(
+    let dreamcast_hint = contains_any_needle(
         &combined,
         &[
             "dreamcast",
@@ -433,7 +433,7 @@ pub fn wii_skip_reason(save_path: &Path) -> Option<String> {
     }
     let lower = save_path.to_string_lossy().to_ascii_lowercase();
     if !looks_like_wii_data_bin_path(save_path)
-        && !contains_any(
+        && !contains_any_needle(
             &lower,
             &["/wii/", "\\wii\\", "nintendo wii", "dolphin", "rvl"],
         )
@@ -674,7 +674,7 @@ pub fn classify_supported_save(
     }
 
     let save_lower = save_path.to_string_lossy().to_ascii_lowercase();
-    if contains_any(
+    if contains_any_needle(
         &save_lower,
         &[
             "gameboy advance",
@@ -697,7 +697,7 @@ pub fn classify_supported_save(
         }
         return None;
     }
-    if contains_any(
+    if contains_any_needle(
         &save_lower,
         &[
             "game boy color",
@@ -764,7 +764,7 @@ pub fn classify_supported_save(
         return None;
     }
 
-    if contains_any(
+    if contains_any_needle(
         &save_lower,
         &[
             "master system",
@@ -824,7 +824,7 @@ pub fn classify_supported_save(
         return None;
     }
 
-    if contains_any(
+    if contains_any_needle(
         &save_lower,
         &[
             "neo geo", "neogeo", "neo-geo", "/mvs/", "\\mvs\\", "/aes/", "\\aes\\",
@@ -842,7 +842,7 @@ pub fn classify_supported_save(
         return None;
     }
 
-    if contains_any(
+    if contains_any_needle(
         &save_lower,
         &[
             "pc engine",
@@ -890,7 +890,7 @@ pub fn classify_supported_save(
         return None;
     }
 
-    if contains_any(
+    if contains_any_needle(
         &save_lower,
         &[
             "playstation",
@@ -1034,11 +1034,7 @@ fn system_slug_from_rom_extension(ext: String) -> Option<&'static str> {
     }
 }
 
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| haystack.contains(needle))
-}
-
-/// Like `contains_any`, but a bare needle has to name a path component.
+/// A bare needle has to name a path component.
 ///
 /// The haystack is the whole lowercased path, which includes whatever random
 /// directory a caller put the save under. A substring match on a bare core name
@@ -1214,19 +1210,19 @@ fn infer_nec_slug(_haystack: &str) -> &'static str {
 }
 
 fn infer_sony_slug(haystack: &str) -> &'static str {
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &["playstation 5", "/ps5/", "\\ps5\\", "sony ps5", "ps5"],
     ) {
         return "ps5";
     }
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &["playstation 4", "/ps4/", "\\ps4\\", "sony ps4", "ps4"],
     ) {
         return "ps4";
     }
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &[
             "playstation 3",
@@ -1239,7 +1235,7 @@ fn infer_sony_slug(haystack: &str) -> &'static str {
     ) {
         return "ps3";
     }
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &[
             "playstation vita",
@@ -1254,7 +1250,7 @@ fn infer_sony_slug(haystack: &str) -> &'static str {
     ) {
         return "psvita";
     }
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &[
             "playstation portable",
@@ -1267,7 +1263,7 @@ fn infer_sony_slug(haystack: &str) -> &'static str {
     ) {
         return "psp";
     }
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &[
             "playstation 2",
@@ -3634,6 +3630,21 @@ mod tests {
         // A genuine core directory still matches.
         assert_eq!(infer_nintendo_slug("/saves/mgba/pokemon.sav"), Some("gba"));
         assert_eq!(infer_nintendo_slug("/saves/vba/pokemon.sav"), Some("gba"));
+
+        // The classifier itself, not only the slug helper: a PlayStation 4
+        // hint inside a random directory name used to win over the save's own
+        // path and answer with the wrong system.
+        let psp = tmp
+            .path()
+            .join(".tmpps4q/ppsspp_win/memstick/PSP/SAVEDATA/ULUS10437GameData00/DISSIDIA.BIN");
+        fs::create_dir_all(psp.parent().unwrap()).unwrap();
+        let mut payload = vec![0x00u8; 500_000];
+        payload[0] = 0xFF;
+        fs::write(&psp, &payload).unwrap();
+        assert_eq!(
+            infer_supported_console_slug(&psp, None).as_deref(),
+            Some("psp")
+        );
     }
 
     #[test]
