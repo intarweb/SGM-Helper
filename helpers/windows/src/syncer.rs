@@ -3254,6 +3254,11 @@ fn projection_runtime_profile_for_system(
             }
             .to_string(),
         ),
+        // The server's system rows name one profile per system; a request
+        // without it is refused the way an NDS restore was.
+        "ngp" => Some("ngp/mednafen".to_string()),
+        "virtualboy" => Some("virtualboy/mednafen".to_string()),
+        "neogeo-cd" => Some("neogeo-cd/retroarch".to_string()),
         _ => None,
     }
 }

@@ -14,6 +14,9 @@ use walkdir::WalkDir;
 const SAVE_EXTENSIONS: &[&str] = &[
     "sav", "srm", "eep", "fla", "sa1", "rtc", "ram", "sra", "mpk", "cpk", "dsv", "gme", "mcr",
     "mc", "mcd", "vmp", "psv", "ps2", "bin", "vms", "dci", "bkr",
+    // Neo Geo Pocket writes its SRAM as `.flash`; without the extension the
+    // file is not discovered at all on a case-sensitive filesystem.
+    "flash", "ngf",
 ];
 
 const MAX_SAVE_BYTES: u64 = 512 * 1024 * 1024;
@@ -797,6 +800,62 @@ fn classify_core(
         }
         return None;
     }
+    // Neo Geo CD is its own system, not NeoGeo: AES/MVS cartridge RAM and CD
+    // backup RAM are different artifacts, and a shared slug would let one
+    // answer a cloud lookup for the other. This hint has to run before the
+    // `neogeo` hint below, which matches `neogeocd` as a directory prefix.
+    if contains_any_needle(
+        &save_lower,
+        &["neogeocd", "/neogeocd/", "\\neogeocd\\", "neogeo cd"],
+    ) {
+        if is_plausible_save_for_system(&save_ext, save_size, "neogeo-cd") {
+            return classify_if_valid(
+                save_path,
+                &save_ext,
+                save_size,
+                "neogeo-cd",
+                format!("path hint neogeo cd + .{} ({} bytes)", save_ext, save_size),
+            );
+        }
+        return None;
+    }
+    // Neo Geo Pocket covers the Colour model the way wonderswan covers both
+    // WonderSwan models; its save is a `.flash` under `ngp/`.
+    if contains_any_needle(
+        &save_lower,
+        &["ngp", "/ngp/", "\\ngp\\", "neo geo pocket", "neogeo pocket"],
+    ) {
+        if is_plausible_save_for_system(&save_ext, save_size, "ngp") {
+            return classify_if_valid(
+                save_path,
+                &save_ext,
+                save_size,
+                "ngp",
+                format!("path hint ngp + .{} ({} bytes)", save_ext, save_size),
+            );
+        }
+        return None;
+    }
+    if contains_any_needle(
+        &save_lower,
+        &[
+            "virtualboy",
+            "/virtualboy/",
+            "\\virtualboy\\",
+            "virtual boy",
+        ],
+    ) {
+        if is_plausible_save_for_system(&save_ext, save_size, "virtualboy") {
+            return classify_if_valid(
+                save_path,
+                &save_ext,
+                save_size,
+                "virtualboy",
+                format!("path hint virtualboy + .{} ({} bytes)", save_ext, save_size),
+            );
+        }
+        return None;
+    }
     if contains_any_needle(
         &save_lower,
         &[
@@ -1513,6 +1572,11 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
         "saturn" => matches!(ext, "sav" | "srm" | "ram" | "bkr"),
         "dreamcast" => matches!(ext, "bin" | "vms" | "dci"),
         "neogeo" => matches!(ext, "sav" | "srm" | "ram"),
+        // The Neo Geo Pocket emulator writes a 512-byte save area with a
+        // 24-byte header; the extension is its own.
+        "ngp" => matches!(ext, "flash" | "ngf"),
+        "virtualboy" => matches!(ext, "srm" | "sav"),
+        "neogeo-cd" => matches!(ext, "srm" | "sav" | "ram"),
         "tgfx16" => matches!(ext, "sav" | "srm" | "ram" | "bkr" | "brm"),
         "wii" => ext == "bin",
         "psx" => matches!(
@@ -1621,6 +1685,15 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
             // a power-of-two size.
             size == 0x12000 || (size.is_power_of_two() && (512..=2_097_152).contains(&size))
         }
+        // Measured on a device plus the emulator's documented SRAM: 512 B of
+        // save area with a 24-byte header is what Mednafen wrote, so a
+        // power-of-two-only table would refuse the only save that exists.
+        "ngp" => matches!(size, 512 | 536 | 1024 | 2048 | 8192 | 16384 | 32768),
+        // Virtual Boy SRAM is 32 KiB, and a 64 KiB dump is the same save with
+        // the rest of the cart's space.
+        "virtualboy" => matches!(size, 32_768 | 65_536),
+        // Neo Geo CD backup RAM: the console's own 8 KiB, and a 32 KiB card.
+        "neogeo-cd" => matches!(size, 8_192 | 32_768),
         "tgfx16" => {
             // TurboGrafx-16 / PC Engine HuCard battery saves are typically 2KB SRAM.
             // PCE CD / TGFX-CD adds backup RAM (BRAM) — 2KB stock, 8KB extended,
@@ -3204,6 +3277,77 @@ mod tests {
             infer_supported_console_slug(&save, None).as_deref(),
             Some("3do")
         );
+    }
+
+    #[test]
+    fn a_neo_geo_pocket_flash_save_classifies_as_ngp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp
+            .path()
+            .join("saves/ngp/Baseball Stars - Pocket Sports Series (Japan, Europe).flash");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::write(&save, vec![0xA5u8; 536]).unwrap();
+
+        assert_eq!(
+            infer_supported_console_slug(&save, None).as_deref(),
+            Some("ngp")
+        );
+    }
+
+    #[test]
+    fn a_flash_save_is_discovered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp.path().join("saves/ngp/game.flash");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::write(&save, vec![0xA5u8; 512]).unwrap();
+
+        let found = discover_save_files(&[tmp.path().join("saves")], true).unwrap();
+        assert_eq!(found, vec![save]);
+    }
+
+    #[test]
+    fn a_virtual_boy_save_classifies_as_virtualboy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp.path().join("saves/virtualboy/3-D Tetris (USA).srm");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::write(&save, vec![0xA5u8; 65_536]).unwrap();
+
+        assert_eq!(
+            infer_supported_console_slug(&save, None).as_deref(),
+            Some("virtualboy")
+        );
+    }
+
+    // AES/MVS cartridge RAM and CD backup RAM are different artifacts. The
+    // directory is `neogeocd`, which the neogeo hint would otherwise claim as a
+    // prefix match.
+    #[test]
+    fn a_neo_geo_cd_save_classifies_as_neogeo_cd_not_neogeo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp.path().join("saves/neogeocd/Choujin Gakuen (Japan).srm");
+        let rom = tmp.path().join("roms/neogeocd/Choujin Gakuen (Japan).cue");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::create_dir_all(rom.parent().unwrap()).unwrap();
+        fs::write(&save, vec![0xA5u8; 8192]).unwrap();
+        fs::write(&rom, b"FILE \"x.bin\" BINARY\n").unwrap();
+
+        assert_eq!(
+            infer_supported_console_slug(&save, Some(rom.as_path())).as_deref(),
+            Some("neogeo-cd")
+        );
+        assert_eq!(saturn_skip_reason(&save, Some(rom.as_path())), None);
+    }
+
+    // The 536 is the whole point of the size table: a power-of-two-only list
+    // refuses the only Neo Geo Pocket save that exists.
+    #[test]
+    fn an_ngp_save_of_an_implausible_size_is_not_classified() {
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp.path().join("saves/ngp/game.flash");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::write(&save, vec![0xA5u8; 4096]).unwrap();
+
+        assert_eq!(infer_supported_console_slug(&save, None), None);
     }
 
     #[test]
