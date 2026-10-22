@@ -297,10 +297,18 @@ pub fn saturn_skip_reason(save_path: &Path, rom_path: Option<&Path>) -> Option<S
             "mednafen saturn",
         ],
     );
-    let saturn_rom_hint = rom_path
-        .and_then(path_extension)
-        .map(|rom_ext| matches!(rom_ext.as_str(), "cue" | "iso" | "chd"))
-        .unwrap_or(false);
+    // A disc image as the ROM says "this is a disc-based save", not "this is a
+    // Saturn save". NeoGeo CD saves sit under the same shape, and reporting
+    // Saturn's structural check for one sends an operator to the wrong system.
+    let other_disc_system = contains_any_needle(
+        &combined,
+        &["neogeo", "/neogeo/", "\\neogeo\\", "neocd", "neogeo cd"],
+    );
+    let saturn_rom_hint = !other_disc_system
+        && rom_path
+            .and_then(path_extension)
+            .map(|rom_ext| matches!(rom_ext.as_str(), "cue" | "iso" | "chd"))
+            .unwrap_or(false);
     if !saturn_hint && !saturn_rom_hint {
         return None;
     }
@@ -3027,6 +3035,21 @@ mod tests {
             infer_supported_console_slug(&save, None).as_deref(),
             Some("3do")
         );
+    }
+
+    #[test]
+    fn a_neogeo_cd_save_does_not_report_a_saturn_reason() {
+        // A disc image as the ROM is common to every CD system; reporting
+        // Saturn's structural check for a NeoGeo CD save names the wrong system.
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp.path().join("saves/neogeocd/Choujin Gakuen (Japan).srm");
+        let rom = tmp.path().join("roms/neogeocd/Choujin Gakuen (Japan).cue");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::create_dir_all(rom.parent().unwrap()).unwrap();
+        fs::write(&save, vec![0xA5u8; 8192]).unwrap();
+        fs::write(&rom, b"FILE \"x.bin\" BINARY\n").unwrap();
+
+        assert_eq!(saturn_skip_reason(&save, Some(rom.as_path())), None);
     }
 
     #[test]
