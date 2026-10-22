@@ -3093,3 +3093,164 @@ fn a_refusal_from_this_release_is_not_probed_again() {
         "the skip line does not date the refusal:\n{stderr}"
     );
 }
+
+fn placeholder_helper() -> Command {
+    Command::cargo_bin("sgm-mister-helper").unwrap()
+}
+
+// The server answers an unrecognised stem with a live game record: name
+// "Unknown", no system, and a sha1 derived from the stem rather than from any
+// cartridge. The helper keys the save on that sha1, and the key carries no
+// system, so two games sharing a title on different systems can answer each
+// other's lookups. The operator has to be told which of the two happened.
+#[test]
+fn an_unrecognised_title_is_named_as_a_placeholder_key() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_placeholder","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"placeholder@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"count":1,"rom":{"fileName":"Unknown.srm","game":{"id":878081,"name":"Unknown","system":null},"sha1":"15f817b3db4e843f203c4eb7949486532715a08f","md5":"139d88db2fec53ba778c7d5d999c51a5"},"success":true}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-placeholder","sha256":"sha-placeholder","version":1}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Sega/Genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("Sega/Genesis/Defenders of Oasis (USA, Europe).srm"),
+        vec![0xC7u8; 2114],
+    )
+    .unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    placeholder_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("placeholder@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = placeholder_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // The save is still uploaded: this change reports, it does not re-key.
+    assert_eq!(
+        upload.calls(),
+        1,
+        "the save was not uploaded:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stderr.contains("did not recognise"),
+        "the placeholder key was not named:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("no cartridge produced"),
+        "the warning does not say the key came from nowhere:\n{stderr}"
+    );
+}
+
+// The control: a resolved record says nothing, so the warning stays meaningful.
+#[test]
+fn a_resolved_title_is_not_reported_as_a_placeholder() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_resolved","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"resolved@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"count":1,"rom":{"fileName":"Madden NFL 94.md","game":{"id":7,"name":"Madden NFL 94","system":{"id":3,"name":"Genesis"}},"sha1":"8043ef4bca0c4cdbdb15d99186f5c976b1ce3ce8","md5":"abc"},"success":true}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-resolved","sha256":"sha-resolved","version":1}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Sega/Genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("Sega/Genesis/Madden NFL 94.srm"),
+        vec![0xC7u8; 2114],
+    )
+    .unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    placeholder_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("resolved@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = placeholder_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !stderr.contains("did not recognise"),
+        "a resolved record was reported as a placeholder:\n{stderr}"
+    );
+}

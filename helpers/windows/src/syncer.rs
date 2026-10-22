@@ -1784,6 +1784,33 @@ fn process_single_save(
             .and_then(|value| value.rom.as_ref())
             .and_then(|value| value.md5.clone());
 
+        // The difference between the server knowing a ROM and inventing one:
+        // an unrecognised stem is answered with a game named "Unknown", no
+        // system, and a sha1 derived from the stem. That sha1 becomes the save's
+        // key, and it carries no system, so two games sharing a title on
+        // different systems can answer each other's lookups. Say which happened
+        // rather than leaving it to be inferred from a log later.
+        if let Some(rom) = lookup.as_ref().and_then(|value| value.rom.as_ref())
+            && rom.system_is_unresolved()
+        {
+            let name = rom
+                .game
+                .as_ref()
+                .and_then(|game| game.name.as_deref())
+                .unwrap_or("-");
+            if rom_sha1.is_some() {
+                eprintln!(
+                    "Warning: the server did not recognise {:?} -- it answered with game {:?} and no system, so this save is keyed on the sha1 it supplied, which no cartridge produced and which carries no system",
+                    rom_stem, name
+                );
+            } else if verbose {
+                eprintln!(
+                    "The server did not recognise {:?} -- it answered with game {:?} and no system, and supplied no sha1; the ROM is hashed locally",
+                    rom_stem, name
+                );
+            }
+        }
+
         if rom_sha1.is_none()
             && let Some(rom_entry) = rom_entry_for_rom
         {
