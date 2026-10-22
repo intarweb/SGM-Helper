@@ -927,8 +927,7 @@ fn restore_single_cloud_save(
         return Ok(());
     }
 
-    let effective_profile =
-        effective_profile_for_cloud_restore(source_kind, source_profile, save_roots);
+    let effective_profile = effective_profile_for_cloud_restore(source_kind, source_profile);
     let device_type = helper_device_type_for_upload(source_kind, &effective_profile, &system_slug);
     let runtime_target = runtime_target_needs_dsv_profile(
         &system_slug,
@@ -1190,24 +1189,10 @@ fn supports_cloud_restore_system(system_slug: &str) -> bool {
 fn effective_profile_for_cloud_restore(
     source_kind: &SourceKind,
     source_profile: &EmulatorProfile,
-    save_roots: &[PathBuf],
 ) -> EmulatorProfile {
     match source_kind {
         SourceKind::MisterFpga => EmulatorProfile::Mister,
         SourceKind::RetroArch => EmulatorProfile::RetroArch,
-        // A Deck or Windows source configured as Generic is still a RetroArch
-        // tree when its saves live in one: RetroDECK and EmuDeck put the cores
-        // behind RetroArch, and calling that Generic chose `n64/mupen-family`
-        // for a device whose core reads the combined bundle. The root path is
-        // the evidence; a source that says otherwise keeps its own profile.
-        SourceKind::SteamDeck | SourceKind::Windows
-            if matches!(source_profile, EmulatorProfile::Generic) =>
-        {
-            save_roots
-                .first()
-                .and_then(|root| infer_profile_from_path("n64", root))
-                .unwrap_or_else(|| source_profile.clone())
-        }
         _ => source_profile.clone(),
     }
 }
@@ -3044,6 +3029,7 @@ fn missing_save_restore_path(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_missing_save(
     api: &ApiClient,
     save_path: &Path,
@@ -3642,11 +3628,6 @@ fn infer_profile_from_path(system_slug: &str, save_path: &Path) -> Option<Emulat
         "retroarch",
         "/retroarch/",
         "\\retroarch\\",
-        // RetroDECK is RetroArch with a fixed layout; its saves are the
-        // core's saves, and a source profile of Generic on such a device has
-        // been choosing the wrong N64 form.
-        "retrodeck",
-        "/retrodeck/",
         "/emulation/saves/",
         "\\emulation\\saves\\",
     ]) {
@@ -4484,29 +4465,6 @@ mod tests {
         longer.extend(vec![0x00u8; 16]);
 
         assert!(!same_save_with_padding(&shorter, &longer));
-    }
-
-    #[test]
-    fn a_retrodeck_save_root_gives_a_cloud_restore_the_retroarch_profile() {
-        // Generic on a Deck is RetroDECK in practice: the n64 core behind
-        // RetroArch reads the combined bundle, and a Generic profile asked the
-        // server for `n64/mupen-family` and a component instead.
-        assert_eq!(
-            effective_profile_for_cloud_restore(
-                &SourceKind::SteamDeck,
-                &EmulatorProfile::Generic,
-                &[PathBuf::from("/home/deck/retrodeck/saves")],
-            ),
-            EmulatorProfile::RetroArch
-        );
-        assert_eq!(
-            effective_profile_for_cloud_restore(
-                &SourceKind::SteamDeck,
-                &EmulatorProfile::Generic,
-                &[PathBuf::from("/home/deck/saves")],
-            ),
-            EmulatorProfile::Generic
-        );
     }
 
     fn cloud_save(
