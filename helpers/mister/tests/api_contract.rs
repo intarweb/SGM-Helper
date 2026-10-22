@@ -252,7 +252,7 @@ fn backend_forced_dry_run_marks_the_summary_and_uploads_nothing() {
         stdout.contains(
             "skipped=1 rejected_n64_controller_pak=0 refused_size_mismatch=0 \
              refused_flattened_components=0 accepted_not_stored=0 \
-             rejected_permanent=0 errors=0 would_upload=1 would_download=0"
+             rejected_permanent=0 duplicate_ignored=0 errors=0 would_upload=1 would_download=0"
         ),
         "a skipped save was counted as a simulated upload, or the simulation was missed: {stdout}"
     );
@@ -1955,5 +1955,97 @@ fn a_blank_refusal_from_a_retroarch_source_is_held_permanently() {
         upload.calls(),
         first_calls,
         "the blank save was uploaded again"
+    );
+}
+
+// A duplicate the server declined to store is still an answer: it kept its own
+// copy and told us so. The pass that saw it re-armed itself, because the next
+// pass looked for a cloud sha that could never equal the local one and uploaded
+// again -- an arcade machine repeated that every four seconds for hours. The
+// declined payload is remembered by its hash, so an unchanged file is reported
+// once and a changed file is uploaded again.
+#[test]
+fn a_duplicate_the_server_declines_is_not_uploaded_again() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_dup","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"dup@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"dup123","md5":"md5v","fileName":"dupe.rom"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"duplicate":true,"duplicateDisposition":"ignored-latest","save":{"id":"save-dup","sha256":"sha-cloud","version":4},"success":true}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Nintendo/Game Boy")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("Nintendo/Game Boy/wario.sav"),
+        vec![0xA5u8; 32768],
+    )
+    .unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    Command::cargo_bin("sgm-mister-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("dup@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    Command::cargo_bin("sgm-mister-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .assert()
+        .success();
+    let after_first = upload.calls();
+    assert_eq!(after_first, 1, "the first pass did not upload");
+
+    let output = Command::cargo_bin("sgm-mister-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        upload.calls(),
+        after_first,
+        "a save the server already held was uploaded again: {stdout}"
+    );
+    assert!(
+        stdout.contains("duplicate_ignored=1") && stdout.contains("uploaded=0"),
+        "the second pass did not report the duplicate as settled: {stdout}"
     );
 }

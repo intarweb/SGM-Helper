@@ -48,6 +48,12 @@ pub struct SyncState {
     /// retry, because a changed payload no longer matches its record.
     #[serde(default)]
     pub terminal_rejections: HashMap<String, TerminalRejection>,
+    /// Saves the server answered as a duplicate it declined to store, keyed by
+    /// local path and valued by the payload hash it declined. The next pass
+    /// reports that file as settled instead of uploading it again; a changed
+    /// payload no longer matches and is uploaded.
+    #[serde(default)]
+    pub duplicate_uploads: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

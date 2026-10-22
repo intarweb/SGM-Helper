@@ -115,6 +115,24 @@ pub struct RomRecord {
 #[derive(Debug, Clone, Deserialize)]
 pub struct UploadSaveResponse {
     pub save: Option<UploadedSave>,
+    /// The server already held this save and kept its own copy. The upload is
+    /// settled: nothing was stored, and nothing will be until the local file
+    /// changes.
+    #[serde(default)]
+    pub duplicate: bool,
+    #[serde(default, rename = "duplicateDisposition")]
+    pub duplicate_disposition: Option<String>,
+}
+
+impl UploadSaveResponse {
+    pub fn declined_duplicate(&self) -> bool {
+        self.duplicate
+            && self
+                .duplicate_disposition
+                .as_deref()
+                .map(|value| value.trim().to_ascii_lowercase().starts_with("ignored"))
+                .unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

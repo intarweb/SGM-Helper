@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use crate::api::{
     ApiClient, CloudSaveSummary, ConflictCheckResponse, LatestSaveContext, LatestSaveRequest,
-    LatestSaveResponse, PortUploadMetadata, RuntimeTarget, UploadedSave,
+    LatestSaveResponse, PortUploadMetadata, RuntimeTarget, UploadSaveResponse,
 };
 use crate::backend_config::sync_config_with_backend;
 use crate::config::AppConfig;
@@ -37,18 +37,6 @@ pub struct SyncOptions {
     pub default_source_kind: SourceKind,
 }
 
-/// Every upload names the file it took and the record it produced. Without
-/// this, one file re-uploaded every pass cannot be told from a healthy run:
-/// the only per-file lines were refusals.
-fn log_upload(path: &Path, id: Option<&str>, bytes: usize) {
-    eprintln!(
-        "Uploaded {} (record {}, {} bytes)",
-        path.display(),
-        id.unwrap_or("-"),
-        bytes
-    );
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct SyncReport {
     pub scanned: usize,
@@ -76,8 +64,43 @@ pub struct SyncReport {
     /// Saves the server refused permanently. Not re-attempted until the
     /// payload changes.
     pub rejected_permanent: usize,
+    /// Saves the server already held and declined to store: settled without a
+    /// write, and reported rather than retried.
+    pub duplicate_ignored: usize,
+    /// Duplicates settled during this pass, recorded by the caller so the next
+    /// pass does not ask again.
+    pub duplicate_pending: Vec<(String, String)>,
     pub errors: usize,
     pub dry_run: bool,
+}
+
+/// Every upload names the file it took and the record it produced. Without
+/// this, one file re-uploaded every pass cannot be told from a healthy run:
+/// the only per-file lines were refusals.
+fn settle_upload(
+    report: &mut SyncReport,
+    path: &std::path::Path,
+    local_sha: &str,
+    bytes: usize,
+    record_id: Option<&str>,
+    duplicate: bool,
+) {
+    eprintln!(
+        "Uploaded {} (record {}, {} bytes)",
+        path.display(),
+        record_id.unwrap_or("-"),
+        bytes
+    );
+    if duplicate {
+        // The server kept its own copy and answers the same way every pass.
+        // Asking again only re-arms the pass and churns both logs.
+        report.duplicate_ignored += 1;
+        report
+            .duplicate_pending
+            .push((path.to_string_lossy().to_string(), local_sha.to_string()));
+        return;
+    }
+    report.uploaded += 1;
 }
 
 /// Marks a summary whose counters describe what would have happened, not what did.
@@ -361,6 +384,26 @@ pub fn run_sync(
 
             for port_save in port_saves {
                 let save_key = port_save.path.to_string_lossy().to_string();
+                if let Some(prior_sha) = sync_state.duplicate_uploads.get(&save_key).cloned() {
+                    if sha256_file(&port_save.path)
+                        .map(|current| current == prior_sha)
+                        .unwrap_or(false)
+                    {
+                        // The server kept its own copy of exactly these bytes and
+                        // answers the same way every pass. Asking again only
+                        // churns both logs; a changed payload is uploaded.
+                        report.duplicate_ignored += 1;
+                        if verbose {
+                            eprintln!(
+                                "Not uploading {}: the server already holds these bytes",
+                                port_save.path.display()
+                            );
+                        }
+                        continue;
+                    }
+                    sync_state.duplicate_uploads.remove(&save_key);
+                }
+
                 let process_result = process_port_save(
                     &api,
                     &port_save,
@@ -466,6 +509,26 @@ pub fn run_sync(
                         continue;
                     }
                     sync_state.terminal_rejections.remove(&save_key);
+                }
+
+                if let Some(prior_sha) = sync_state.duplicate_uploads.get(&save_key).cloned() {
+                    if sha256_file(&save_path)
+                        .map(|current| current == prior_sha)
+                        .unwrap_or(false)
+                    {
+                        // The server kept its own copy of exactly these bytes and
+                        // answers the same way every pass. Asking again only
+                        // churns both logs; a changed payload is uploaded.
+                        report.duplicate_ignored += 1;
+                        if verbose {
+                            eprintln!(
+                                "Not uploading {}: the server already holds these bytes",
+                                save_path.display()
+                            );
+                        }
+                        continue;
+                    }
+                    sync_state.duplicate_uploads.remove(&save_key);
                 }
 
                 let process_result = process_single_save(
@@ -606,6 +669,11 @@ pub fn run_sync(
         )?;
     }
 
+    if !report.duplicate_pending.is_empty() {
+        for (path, sha) in report.duplicate_pending.drain(..) {
+            sync_state.duplicate_uploads.insert(path, sha);
+        }
+    }
     if !options.dry_run {
         save_sync_state(&state_dir, &sync_state)?;
     }
@@ -1657,8 +1725,14 @@ fn process_port_save(
             Some(&runtime_target),
             Some(&upload_metadata),
         )?;
-        log_upload(Path::new(&filename), None, bytes.len());
-        report.uploaded += 1;
+        settle_upload(
+            report,
+            Path::new(&filename),
+            &local_sha,
+            bytes.len(),
+            None,
+            response.declined_duplicate(),
+        );
         Ok(Some(processed_entry(
             state_key.clone(),
             synced_entry(
@@ -2106,22 +2180,30 @@ fn process_single_save(
             verbose,
         );
         let upload_id: Option<String>;
+        let duplicate_uploaded: bool;
         let upload_version = match upload_result {
-            Ok(Some(save)) => {
-                upload_id = save.id.clone();
-                save.version
-            }
-            Ok(None) => {
-                // 2xx with no `save`: the server accepted the request but stored
-                // nothing.  Counting this as uploaded is how a client reports a
-                // hundred successful uploads while the store never grows.
-                report.accepted_not_stored += 1;
-                eprintln!(
-                    "Server accepted {} but returned no save; nothing was stored",
-                    save_path.display()
-                );
-                return Ok(None);
-            }
+            Ok(ref response) => match response
+                .save
+                .as_ref()
+                .filter(|save| save.id.is_some() || save.sha256.is_some())
+            {
+                Some(save) => {
+                    duplicate_uploaded = response.declined_duplicate();
+                    upload_id = save.id.clone();
+                    save.version
+                }
+                None => {
+                    // 2xx with no `save`: the server accepted the request but stored
+                    // nothing.  Counting this as uploaded is how a client reports a
+                    // hundred successful uploads while the store never grows.
+                    report.accepted_not_stored += 1;
+                    eprintln!(
+                        "Server accepted {} but returned no save; nothing was stored",
+                        save_path.display()
+                    );
+                    return Ok(None);
+                }
+            },
             Err(err) => {
                 if is_empty_n64_controller_pak_rejection(&err, &system_slug) {
                     report.rejected_n64_controller_pak += 1;
@@ -2136,12 +2218,14 @@ fn process_single_save(
             }
         };
 
-        log_upload(
+        settle_upload(
+            report,
             save_path,
-            upload_id.as_deref(),
+            &local_sha,
             normalized_save.canonical_bytes.len(),
+            upload_id.as_deref(),
+            duplicate_uploaded,
         );
-        report.uploaded += 1;
         return Ok(Some(processed_entry(
             state_key.clone(),
             synced_entry(
@@ -2196,22 +2280,30 @@ fn process_single_save(
             verbose,
         );
         let upload_id: Option<String>;
+        let duplicate_uploaded: bool;
         let upload_version = match upload_result {
-            Ok(Some(save)) => {
-                upload_id = save.id.clone();
-                save.version
-            }
-            Ok(None) => {
-                // 2xx with no `save`: the server accepted the request but stored
-                // nothing.  Counting this as uploaded is how a client reports a
-                // hundred successful uploads while the store never grows.
-                report.accepted_not_stored += 1;
-                eprintln!(
-                    "Server accepted {} but returned no save; nothing was stored",
-                    save_path.display()
-                );
-                return Ok(None);
-            }
+            Ok(ref response) => match response
+                .save
+                .as_ref()
+                .filter(|save| save.id.is_some() || save.sha256.is_some())
+            {
+                Some(save) => {
+                    duplicate_uploaded = response.declined_duplicate();
+                    upload_id = save.id.clone();
+                    save.version
+                }
+                None => {
+                    // 2xx with no `save`: the server accepted the request but stored
+                    // nothing.  Counting this as uploaded is how a client reports a
+                    // hundred successful uploads while the store never grows.
+                    report.accepted_not_stored += 1;
+                    eprintln!(
+                        "Server accepted {} but returned no save; nothing was stored",
+                        save_path.display()
+                    );
+                    return Ok(None);
+                }
+            },
             Err(err) => {
                 if is_empty_n64_controller_pak_rejection(&err, &system_slug) {
                     report.rejected_n64_controller_pak += 1;
@@ -2225,12 +2317,14 @@ fn process_single_save(
                 return Err(err);
             }
         };
-        log_upload(
+        settle_upload(
+            report,
             save_path,
-            upload_id.as_deref(),
+            &local_sha,
             normalized_save.canonical_bytes.len(),
+            upload_id.as_deref(),
+            duplicate_uploaded,
         );
-        report.uploaded += 1;
         return Ok(Some(processed_entry(
             state_key.clone(),
             synced_entry(
@@ -2299,7 +2393,7 @@ fn process_single_save(
                 )));
             }
             let filename = upload_filename_for_sync(save_path, &system_slug);
-            api.upload_save(
+            let response = api.upload_save(
                 &filename,
                 normalized_save.canonical_bytes.clone(),
                 &active_rom_sha1,
@@ -2314,8 +2408,14 @@ fn process_single_save(
                 Some(&runtime_target),
                 None,
             )?;
-            log_upload(save_path, None, normalized_save.canonical_bytes.len());
-            report.uploaded += 1;
+            settle_upload(
+                report,
+                save_path,
+                &local_sha,
+                normalized_save.canonical_bytes.len(),
+                None,
+                response.declined_duplicate(),
+            );
             return Ok(Some(processed_entry(
                 state_key.clone(),
                 synced_entry(
@@ -2359,7 +2459,7 @@ fn process_single_save(
                     );
                 }
                 let filename = upload_filename_for_sync(save_path, &system_slug);
-                api.upload_save(
+                let response = api.upload_save(
                     &filename,
                     normalized_save.canonical_bytes.clone(),
                     &active_rom_sha1,
@@ -2374,8 +2474,14 @@ fn process_single_save(
                     Some(&runtime_target),
                     None,
                 )?;
-                log_upload(save_path, None, normalized_save.canonical_bytes.len());
-                report.uploaded += 1;
+                settle_upload(
+                    report,
+                    save_path,
+                    &local_sha,
+                    normalized_save.canonical_bytes.len(),
+                    None,
+                    response.declined_duplicate(),
+                );
                 return Ok(Some(processed_entry(
                     state_key.clone(),
                     synced_entry(
@@ -2454,7 +2560,7 @@ fn process_single_save(
                     );
                 }
                 let filename = upload_filename_for_sync(save_path, &system_slug);
-                api.upload_save(
+                let response = api.upload_save(
                     &filename,
                     normalized_save.canonical_bytes.clone(),
                     &active_rom_sha1,
@@ -2469,8 +2575,14 @@ fn process_single_save(
                     Some(&runtime_target),
                     None,
                 )?;
-                log_upload(save_path, None, normalized_save.canonical_bytes.len());
-                report.uploaded += 1;
+                settle_upload(
+                    report,
+                    save_path,
+                    &local_sha,
+                    normalized_save.canonical_bytes.len(),
+                    None,
+                    response.declined_duplicate(),
+                );
                 return Ok(Some(processed_entry(
                     state_key.clone(),
                     synced_entry(
@@ -3564,7 +3676,7 @@ fn upload_with_n64_mister_cpk_fallback(
     machine: Option<&str>,
     runtime_target: &RuntimeTarget,
     verbose: bool,
-) -> Result<Option<UploadedSave>> {
+) -> Result<UploadSaveResponse> {
     let upload_result = api.upload_save(
         filename,
         bytes.to_vec(),
@@ -3616,9 +3728,7 @@ fn upload_with_n64_mister_cpk_fallback(
     // carries `id` and `sha256` and, on some paths, no `version` at all; reading
     // that as "nothing was stored" reported every such upload as accepted and
     // discarded while the record was on disk.
-    Ok(upload_response
-        .save
-        .filter(|save| save.id.is_some() || save.sha256.is_some()))
+    Ok(upload_response)
 }
 
 fn should_retry_n64_mister_cpk_as_mpk(
