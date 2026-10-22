@@ -3778,3 +3778,73 @@ fn a_refused_lookup_is_not_a_permanent_rejection_of_the_save() {
         "a refused lookup was stored as a permanent rejection of the save:\n{state}"
     );
 }
+
+fn romroot_helper() -> Command {
+    Command::cargo_bin("sgm-windows-helper").unwrap()
+}
+
+// A ROM root that does not exist indexes nothing, and every save then looks like
+// a title the server has never seen. The run reports each root and what came out
+// of it, so the absence is visible instead of inferred from a missing hash.
+#[test]
+fn a_missing_rom_root_is_reported() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_romroot","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"romroot@example.com"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let config = tmp.path().join("config-romroot.ini");
+    fs::write(
+        &config,
+        format!(
+            "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.genesis]\nLABEL=\"genesis\"\nKIND=\"retroarch\"\nPROFILE=\"retroarch\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"genesis\"\n",
+            server.port(),
+            root.display(),
+            state_dir.display(),
+            root.join("saves").display(),
+            root.join("not-mounted").display()
+        ),
+    )
+    .unwrap();
+
+    romroot_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("romroot@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = romroot_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("does not exist"),
+        "a missing ROM root was not reported:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("exists=false, indexed=0"),
+        "the ROM root report does not say what it found:\n{stderr}"
+    );
+}

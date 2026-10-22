@@ -118,7 +118,32 @@ pub fn discover_rom_index(
     roots: &[PathBuf],
     recursive: bool,
 ) -> Result<HashMap<String, RomIndexEntry>> {
-    let files = discover_files_with_extensions(roots, ROM_EXTENSIONS, recursive)?;
+    // A ROM root that is missing or empty indexes nothing, and every save then
+    // looks like a title the server has never seen. Report each root and what
+    // came out of it rather than leaving the absence to be inferred.
+    let mut per_root = Vec::new();
+    for root in roots {
+        let exists = root.exists();
+        if !exists {
+            eprintln!(
+                "Warning: ROM root {} does not exist: nothing under it is indexed",
+                root.display()
+            );
+        }
+        let files = if exists {
+            discover_files_with_extensions(std::slice::from_ref(root), ROM_EXTENSIONS, recursive)?
+        } else {
+            Vec::new()
+        };
+        eprintln!(
+            "ROM root {}: exists={}, indexed={}",
+            root.display(),
+            exists,
+            files.len()
+        );
+        per_root.push(files);
+    }
+    let files: Vec<PathBuf> = per_root.into_iter().flatten().collect();
     let mut index = HashMap::new();
     for path in files {
         let stem = filename_stem(&path);
