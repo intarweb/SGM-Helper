@@ -771,6 +771,88 @@ fn a_dry_run_names_the_save_it_would_upload() {
     );
 }
 
+// The same game's save in two containers is one save in two spellings, and the
+// helper keeps the preferred one. Which file it dropped used to be visible only
+// under --verbose, which makes a real drop indistinguishable from a save that
+// was never seen.
+#[test]
+fn a_duplicate_save_variant_is_named_without_verbose() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_dupvar","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"dupvar@example.com"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":0,"limit":100,"offset":0,"saves":[]}"#);
+    });
+    let _upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-dupvar","sha256":"sha-dupvar"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/psx")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let raw = build_valid_ps1_memcard();
+    fs::write(
+        root.join("saves/psx/Tom Clancy's Rainbow Six (USA).srm"),
+        &raw,
+    )
+    .unwrap();
+    fs::write(
+        root.join("saves/psx/Tom Clancy's Rainbow Six (USA).mcd"),
+        &raw,
+    )
+    .unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("dupvar@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("duplicate save variant"),
+        "the dropped variant is not named without --verbose:\n{stderr}"
+    );
+}
+
 #[test]
 fn sync_accepts_ps1_gme_and_uploads_normalized_payload() {
     let expected_line = "ps-line:psx:retroarch:memory-card-1";

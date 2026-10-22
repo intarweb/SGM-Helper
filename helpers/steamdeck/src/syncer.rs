@@ -522,13 +522,14 @@ pub fn run_sync(
                     && preferred_path != &save_path
                 {
                     report.skipped += 1;
-                    if verbose {
-                        eprintln!(
-                            "Skipping duplicate save variant {} in favor of preferred {}",
-                            save_path.display(),
-                            preferred_path.display()
-                        );
-                    }
+                    // Named every time, not only under --verbose: a file the tool read
+                    // and then decided not to upload is exactly what a silent drop looks
+                    // like from the outside, whatever the reason was.
+                    eprintln!(
+                        "Skipping duplicate save variant {} in favor of preferred {}",
+                        save_path.display(),
+                        preferred_path.display()
+                    );
                     continue;
                 }
 
