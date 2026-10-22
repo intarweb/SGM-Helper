@@ -1200,7 +1200,7 @@ fn system_slug_from_save_extension(ext: &str) -> Option<&'static str> {
 ///
 /// Both separators, because the scanner runs on Windows and on Linux and the
 /// paths it sees are whichever the device uses.
-fn is_mame_nvram_component(save_path: &Path) -> bool {
+pub(crate) fn is_mame_nvram_component(save_path: &Path) -> bool {
     let normalized = save_path.to_string_lossy().replace('\\', "/");
     let lowered = normalized.to_ascii_lowercase();
     let Some((_, after)) = lowered.rsplit_once("/nvram/") else {

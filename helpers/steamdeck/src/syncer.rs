@@ -14,9 +14,10 @@ use crate::ports::{PortSaveMatch, discover_port_save_matches};
 use crate::scanner::{
     RomIndexEntry, SaveAdapterProfile, SaveContainerFormat, allow_write, classify_supported_save,
     discover_rom_index, discover_save_files, dreamcast_skip_reason,
-    encode_download_for_local_container, filename_stem, md5_file, n64_controller_pak_entry_count,
-    normalize_save_bytes_for_sync, normalize_save_for_sync, saturn_skip_reason, sha1_file,
-    sha256_bytes, sha256_file, sidecar_label, wii_skip_reason, wii_title_code_from_path,
+    encode_download_for_local_container, filename_stem, is_mame_nvram_component, md5_file,
+    n64_controller_pak_entry_count, normalize_save_bytes_for_sync, normalize_save_for_sync,
+    saturn_skip_reason, sha1_file, sha256_bytes, sha256_file, sidecar_label, wii_skip_reason,
+    wii_title_code_from_path,
 };
 use crate::sources::{EmulatorProfile, SourceKind, prepare_sources_for_sync};
 use crate::state::{
@@ -3099,6 +3100,24 @@ fn save_selection_key(save_path: &Path) -> String {
     {
         return format!("wii:{}", title_code.to_ascii_lowercase());
     }
+    // A MAME nvram component's *file name* is its slot inside one machine --
+    // eeprom, game, bmcu_mcu -- and the same three names appear under every
+    // machine. Keying on the stem alone collapsed all 34 machines' eeproms into
+    // one "eeprom" entry and kept a twelfth of the collection.
+    if is_mame_nvram_component(save_path) {
+        let machine = save_path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let file = save_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        return format!("arcade:{machine}:{file}");
+    }
     let stem = filename_stem(save_path).to_ascii_lowercase();
     // Additive save extensions are NOT alternative formats of the main save —
     // they carry independent state that must NOT be deduplicated against the
@@ -4536,5 +4555,34 @@ mod tests {
         let systems = vec!["*".to_string()];
         assert!(source_allows_system(&systems, "arcade"));
         assert!(source_allows_system(&systems, "anything-at-all"));
+    }
+
+    #[test]
+    fn two_machines_each_keeping_an_eeprom_are_not_variants_of_each_other() {
+        // Every machine writes a file called `eeprom`; keying on the file name
+        // alone made 34 of them one entry and kept a twelfth of the collection.
+        let first = normalize_selection_key("/m/nvram/akatana/eeprom");
+        let second = normalize_selection_key("/m/nvram/acedrvrw/eeprom");
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn one_machines_eeprom_and_game_are_distinct_components() {
+        let eeprom = normalize_selection_key("/m/nvram/akatana/eeprom");
+        let game = normalize_selection_key("/m/nvram/akatana/game");
+        assert_ne!(eeprom, game);
+    }
+
+    #[test]
+    fn the_same_nvram_component_is_still_deduped() {
+        // Same machine, same slot, found through two roots: one key, so the
+        // dedup still collapses it.
+        let first = normalize_selection_key("/a/nvram/sfa3/eeprom");
+        let second = normalize_selection_key("/b/nvram/SFA3/EEPROM");
+        assert_eq!(first, second);
+    }
+
+    fn normalize_selection_key(path: &str) -> String {
+        save_selection_key(Path::new(path))
     }
 }
