@@ -4606,6 +4606,153 @@ fn a_cloud_save_already_held_is_named_under_verbose() {
     );
 }
 
+// Under `n64/retroarch` the core reads one combined bundle per game. A record
+// uploaded as a component (.eep) names a file that core never loads, and
+// writing one beside the bundle is how a device manufactured nine strays in one
+// pass and then refused its own restore ever after.
+#[test]
+fn an_n64_component_record_restores_as_the_bundle() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_n64","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"n64@example.com"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":1,"limit":100,"offset":0,"saves":[{"id":"save-ge","filename":"GOLDENEYE.eep","displayTitle":"GoldenEye 007","systemSlug":"n64","sha256":"dddddddddddddddd","version":2,"latestSizeBytes":296960}]}"#);
+    });
+    let download = server.mock(|when, then| {
+        when.method(GET).path("/saves/download");
+        then.status(200).body(vec![0xC7u8; 296960]);
+    });
+    let _upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-ge","sha256":"dddddddddddddddd"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/n64")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let config = writeback_config_for(&tmp, &server, &root, &state_dir, "n64");
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("n64@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(download.calls(), 1, "the restore was skipped:\n{stderr}");
+    assert!(
+        root.join("saves/n64/GOLDENEYE.srm").exists(),
+        "the bundle was not written:\n{stderr}"
+    );
+    assert!(
+        !root.join("saves/n64/GOLDENEYE.eep").exists(),
+        "a component file was manufactured beside the bundle:\n{stderr}"
+    );
+}
+
+// The self-perpetuating half: a directory that already holds the bundle gets no
+// component file, pass after pass.
+#[test]
+fn an_n64_bundle_directory_gains_no_component_file() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_n64b","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"n64b@example.com"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":1,"limit":100,"offset":0,"saves":[{"id":"save-ge","filename":"GOLDENEYE.eep","displayTitle":"GoldenEye 007","systemSlug":"n64","sha256":"dddddddddddddddd","version":2,"latestSizeBytes":296960}]}"#);
+    });
+    let download = server.mock(|when, then| {
+        when.method(GET).path("/saves/download");
+        then.status(200).body(vec![0xC7u8; 296960]);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/n64")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let bundle = root.join("saves/n64/GOLDENEYE.srm");
+    fs::write(&bundle, vec![0xC7u8; 296960]).unwrap();
+    let config = writeback_config_for(&tmp, &server, &root, &state_dir, "n64");
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("n64b@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    for _ in 0..2 {
+        wb_helper()
+            .arg("--config")
+            .arg(&config)
+            .arg("sync")
+            .output()
+            .unwrap();
+    }
+
+    assert_eq!(download.calls(), 0, "the bundle was fetched again");
+    assert!(
+        !root.join("saves/n64/GOLDENEYE.eep").exists(),
+        "a component file appeared beside the bundle"
+    );
+}
+
 // A same-named save in the write-back directory may belong to another
 // system; the helper must not overwrite it on a name match alone.
 #[test]

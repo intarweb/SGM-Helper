@@ -1201,6 +1201,25 @@ fn cloud_target_extension(
     cloud_save: &CloudSaveSummary,
     runtime_profile: Option<&str>,
 ) -> Option<String> {
+    // Under `n64/retroarch` the core reads one combined bundle, and the record's
+    // own filename may still name a component it was uploaded as. A component
+    // extension is not a file that core loads, so the target is the profile's
+    // `.srm`; the alternative is writing a 296,960-byte bundle over a 2 KiB
+    // eeprom, which the size guard refuses every pass.
+    if cloud_save.system_slug.eq_ignore_ascii_case("n64")
+        && matches!(
+            runtime_profile
+                .map(|profile| profile.to_ascii_lowercase())
+                .as_deref(),
+            Some("n64/retroarch")
+        )
+        && matches!(
+            extension_from_filename(&cloud_save.filename).as_deref(),
+            Some("eep" | "sra" | "fla" | "mpk" | "cpk")
+        )
+    {
+        return Some("srm".to_string());
+    }
     let profile_extension = profile_target_extension(cloud_save, runtime_profile);
     // A sidecar must never land on a primary target: an `.rtc` mapped onto a
     // `.srm` overwrites the real cartridge save with seconds of clock state.
@@ -1650,6 +1669,37 @@ fn restore_target_without_overwriting_another_system(
     candidate
 }
 
+/// N64 saves come in two shapes: the combined bundle that the retroarch core
+/// reads, and the components a cartridge carries (eeprom, SRAM, flash, and the
+/// controller pak). One is not the other, so a bundle target must never adopt a
+/// component file, whatever the record's own filename says.
+fn n64_shapes_differ(candidate: &str, target: &str) -> bool {
+    fn shape(name: &str) -> u8 {
+        let ext = Path::new(name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase());
+        match ext.as_deref() {
+            Some("srm") => 1,
+            Some("eep" | "sra" | "fla" | "mpk" | "cpk") => 2,
+            _ => 0,
+        }
+    }
+    shape(candidate) != shape(target)
+}
+
+/// Whether a same-stem file may stand in for `target` on this system.
+///
+/// Cross-extension is the normal case: a `.sav` and a `.srm` are one save in
+/// two spellings. N64 is the exception -- its bundle and its components are
+/// different files, not different spellings of one.
+fn shape_compatible(system_slug: &str, candidate: &str, target: &str) -> bool {
+    if system_slug == "n64" {
+        return !n64_shapes_differ(candidate, target);
+    }
+    true
+}
+
 /// Files in `directory` that share `filename`'s stem and that the state records
 /// as this system's. Sorted, so a caller that refuses on ambiguity names them in
 /// a stable order.
@@ -1669,7 +1719,10 @@ fn same_stem_known_saves(
                     entry
                         .file_name()
                         .and_then(|name| name.to_str())
-                        .map(|name| same_save_stem(name, filename))
+                        .map(|name| {
+                            same_save_stem(name, filename)
+                                && shape_compatible(system_slug, name, filename)
+                        })
                         .unwrap_or(false)
                 })
                 .filter(|entry| known_save_for_system(entry, system_slug, known_saves))
