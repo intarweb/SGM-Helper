@@ -553,7 +553,20 @@ pub fn classify_supported_save(
     // eeprom`, `.../game`, `.../bmcu_mcu` -- with no extension at all. The
     // shape of the path is the whole of the evidence, so this rule runs before
     // anything that reads an extension.
-    if is_mame_nvram_component(save_path) {
+    // A console save that happens to sit under nvram/ is still a console save.
+    // Our own restores used to write RetroArch saves into this tree
+    // (`nvram/snes/F-Zero (USA).srm`), and MAME's own files are chip names with
+    // no extension or a rom-numbered one (`29f016a.27h`, `smw.nv`). The
+    // extension separates the two populations; the directory cannot, because
+    // MAME has real machines named snes and n64.
+    let console_save_extension = path_extension(save_path)
+        .map(|ext| {
+            SAVE_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(&ext))
+        })
+        .unwrap_or(false);
+    if !console_save_extension && is_mame_nvram_component(save_path) {
         let save_size = save_path.metadata().ok()?.len();
         if !is_plausible_save_size(save_size) || looks_plain_text(save_path) {
             return None;
@@ -3547,6 +3560,38 @@ mod tests {
                 Some(slug),
                 "{path}"
             );
+        }
+    }
+
+    #[test]
+    fn a_console_save_under_nvram_is_not_an_arcade_component() {
+        // Our own restores once wrote RetroArch saves into this tree: long
+        // display names carrying a console save extension. MAME's own files at
+        // the same depth are chip names with no extension or a rom-numbered
+        // one. The extension separates them; the directory cannot, because
+        // MAME has real machines named snes and n64.
+        let tmp = tempfile::tempdir().unwrap();
+        for (relative, want) in [
+            // Console saves: never arcade, whatever they do classify as.
+            ("snes/F-Zero (USA).srm", Some("snes")),
+            ("n64/GOLDENEYE.eep", None),
+            ("snes/smw.nv", Some("arcade")),
+            ("ddr2m/29f016a.27h", Some("arcade")),
+            ("sfa3/eeprom", Some("arcade")),
+        ] {
+            let path = tmp.path().join("MAME-0.288/nvram").join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, vec![0xffu8; 2048]).unwrap();
+            let got = infer_supported_console_slug(&path, None);
+            if relative.starts_with("snes/F-Zero") || relative.starts_with("n64/GOLDENEYE") {
+                assert_ne!(
+                    got.as_deref(),
+                    Some("arcade"),
+                    "{relative} is not a MAME component"
+                );
+            } else {
+                assert_eq!(got.as_deref(), want, "{relative}");
+            }
         }
     }
 }
