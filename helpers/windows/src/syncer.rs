@@ -2045,6 +2045,9 @@ fn process_single_save(
         .filter(|entry| !entry.ambiguous)
         .map(|entry| entry.path.as_path());
     let mut state_key = save_key.to_string();
+    let ambiguous_systems = rom_entry
+        .filter(|entry| entry.ambiguous)
+        .map(|entry| entry.systems.join(", "));
     let Some(classification) = classify_supported_save(save_path, rom_hint) else {
         report.skipped += 1;
         if let Some(reason) = dreamcast_skip_reason(save_path, rom_hint) {
@@ -2109,6 +2112,12 @@ fn process_single_save(
         .and_then(|machine| rom_index.get(&machine.to_ascii_lowercase()))
         .or(rom_entry);
     let classification_evidence = classification.evidence;
+    if verbose && let Some(systems) = ambiguous_systems.as_deref() {
+        eprintln!(
+            "Stem {:?} is held by {} in the ROM index; {} decided from its save directory",
+            stem, systems, system_slug
+        );
+    }
     if verbose && rom_entry_for_rom.is_none() {
         // Naming the fallback matters: the same save classifies differently
         // depending on whether the ROM root resolved, and an unnamed fallback

@@ -4867,6 +4867,16 @@ fn a_save_whose_stem_is_in_two_systems_uses_its_own_directory() {
         !stderr.contains("Detected genesis savegame"),
         "the ambiguous ROM path decided the system:\n{stderr}"
     );
+    // The decision has to be visible: an ambiguous stem that is resolved
+    // silently is indistinguishable from one that was never noticed.
+    assert!(
+        stderr.contains("is held by genesis"),
+        "the ambiguity and its candidates were not named:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("decided from its save directory"),
+        "the line does not say what decided:\n{stderr}"
+    );
 }
 
 // A same-named save in the write-back directory may belong to another

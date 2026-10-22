@@ -104,6 +104,9 @@ pub struct RomIndexEntry {
     /// The path is then one candidate among several, not the answer: a save's
     /// own directory may name a system the ROM path contradicts.
     pub ambiguous: bool,
+    /// The systems the stem was found under, for the line that says what an
+    /// ambiguous stem was decided against. Empty unless `ambiguous`.
+    pub systems: Vec<String>,
 }
 
 /// The name the server knows a system by. A MiSTer core is called `tgfx16`
@@ -196,7 +199,14 @@ pub fn discover_rom_index(
                 let held = rom_system_token(&entry.get().path);
                 let found = rom_system_token(&path);
                 if held != found {
-                    entry.get_mut().ambiguous = true;
+                    let held_entry = entry.get_mut();
+                    held_entry.ambiguous = true;
+                    if !held_entry.systems.iter().any(|system| system == &held) {
+                        held_entry.systems.push(held);
+                    }
+                    if !held_entry.systems.iter().any(|system| system == &found) {
+                        held_entry.systems.push(found);
+                    }
                 }
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -204,6 +214,7 @@ pub fn discover_rom_index(
                     stem,
                     path,
                     ambiguous: false,
+                    systems: Vec::new(),
                 });
             }
         }
