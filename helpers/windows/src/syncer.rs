@@ -467,6 +467,8 @@ pub fn run_sync(
         ..Default::default()
     };
     let mut rom_hash_cache: HashMap<String, (String, String)> = HashMap::new();
+    let mut announced_ambiguous_stems: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     for source in sources {
         let save_files = discover_save_files(&source.save_roots, source.recursive)?;
@@ -603,6 +605,7 @@ pub fn run_sync(
                 app_password,
                 options,
                 &mut report,
+                &mut announced_ambiguous_stems,
                 verbose,
             );
 
@@ -2052,6 +2055,7 @@ fn process_single_save(
     app_password: Option<&str>,
     options: &SyncOptions,
     report: &mut SyncReport,
+    announced_ambiguous_stems: &mut std::collections::HashSet<String>,
     verbose: bool,
 ) -> Result<Option<ProcessedEntry>> {
     let stem = filename_stem(save_path);
@@ -2083,6 +2087,15 @@ fn process_single_save(
             eprintln!("Skipping PS2 save {}: {}", save_path.display(), reason);
         } else if let Some(reason) = wii_skip_reason(save_path) {
             eprintln!("Skipping Wii save {}: {}", save_path.display(), reason);
+        } else if matches!(
+            save_extension(save_path).as_deref(),
+            Some("rtc") | Some("smpc")
+        ) {
+            report.skipped_by_policy += 1;
+            eprintln!(
+                "Skipping {}: a clock sidecar travels with its save rather than syncing on its own",
+                save_path.display()
+            );
         } else if rom_entry.map(|entry| entry.ambiguous).unwrap_or(false) {
             report.skipped_by_policy += 1;
             eprintln!(
@@ -2132,7 +2145,9 @@ fn process_single_save(
         .and_then(|machine| rom_index.get(&machine.to_ascii_lowercase()))
         .or(rom_entry);
     let classification_evidence = classification.evidence;
-    if verbose && let Some(systems) = ambiguous_systems.as_deref() {
+    if let Some(systems) = ambiguous_systems.as_deref()
+        && announced_ambiguous_stems.insert(stem.clone())
+    {
         eprintln!(
             "Stem {:?} is held by {} in the ROM index; {} decided from its save directory",
             stem, systems, system_slug
@@ -2209,7 +2224,7 @@ fn process_single_save(
     ) {
         report.skipped_by_policy += 1;
         eprintln!(
-            "Skipping {}: the RTC sidecar travels with its save, not as its own record",
+            "Skipping {}: a clock sidecar travels with its save rather than syncing on its own",
             save_path.display()
         );
         return Ok(None);

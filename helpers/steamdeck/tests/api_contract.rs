@@ -2823,7 +2823,7 @@ fn an_rtc_sidecar_is_not_uploaded_as_its_own_save() {
         "the RTC sidecar was uploaded as a save: {stdout}\nSTDERR: {stderr}"
     );
     assert!(
-        stderr.contains("RTC sidecar travels with its save"),
+        stderr.contains("a clock sidecar travels with its save"),
         "the sidecar was skipped without saying so: {stderr}"
     );
     assert!(
@@ -5140,6 +5140,91 @@ fn a_save_whose_stem_is_in_two_systems_uses_its_own_directory() {
     assert!(
         stderr.contains("decided from its save directory"),
         "the line does not say what decided:\n{stderr}"
+    );
+
+    // The services run quiet: a decision that only appears under --verbose is
+    // invisible where it matters.
+    let quiet = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let quiet_stderr = String::from_utf8_lossy(&quiet.stderr);
+    assert!(
+        quiet_stderr.contains("is held by genesis, nes"),
+        "the ambiguity line is not printed without --verbose:\n{quiet_stderr}"
+    );
+    assert!(
+        !quiet_stderr.contains("Detected nes savegame"),
+        "the quiet run printed the verbose classification line"
+    );
+}
+
+// An `.rtc`/`.smpc` never syncs on its own, and it used to fall through into
+// classification and pick up whatever message that path produced -- two
+// different ones for the same extension in one pass.
+#[test]
+fn a_clock_sidecar_says_it_travels_with_its_save() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_clock","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"clock@example.com"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":0,"limit":100,"offset":0,"saves":[]}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/gbc")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("saves/gbc/Pokemon - Crystal Version (USA).rtc"),
+        vec![0x11u8; 8],
+    )
+    .unwrap();
+    let config = writeback_config_for(&tmp, &server, &root, &state_dir, "gameboy");
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("clock@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("a clock sidecar travels with its save"),
+        "the sidecar's skip reason is not named:\n{stderr}"
     );
 }
 
