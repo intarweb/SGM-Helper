@@ -5312,6 +5312,88 @@ fn a_missing_save_restore_refuses_an_implausible_payload() {
     );
 }
 
+// The duplicate map suppresses an upload until the file's bytes change. That
+// is a permanent decision, and it used to be invisible in a quiet run: the file
+// was neither uploaded, nor rejected, nor mentioned -- and no state entry was
+// written either, so it looked like a save the helper never saw.
+#[test]
+fn a_save_the_server_already_holds_says_so_every_run() {
+    use sha2::{Digest, Sha256};
+
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_dupmap","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"dupmap@example.com"}}"#);
+    });
+    let _latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":0,"limit":100,"offset":0,"saves":[]}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-dupmap","sha256":"sha-dupmap"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let path = root.join("saves/genesis/Madden NFL '94 (USA, Europe).srm");
+    let bytes = vec![0xA5u8; 2114];
+    fs::write(&path, &bytes).unwrap();
+    let sha = format!("{:x}", Sha256::digest(&bytes));
+    let state = format!(
+        r#"{{"entries":{{}},"terminal_rejections":{{}},"duplicate_uploads":{{"{}":"{}"}}}}"#,
+        path.display(),
+        sha
+    );
+    fs::write(state_dir.join("sync_state.json"), state).unwrap();
+    let config = writeback_config_for(&tmp, &server, &root, &state_dir, "genesis");
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("dupmap@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(upload.calls(), 0, "the save was uploaded again:\n{stderr}");
+    assert!(
+        stderr.contains("the server already holds these bytes"),
+        "the skip is not named in a quiet run:\n{stderr}"
+    );
+}
+
 // A same-named save in the write-back directory may belong to another
 // system; the helper must not overwrite it on a name match alone.
 #[test]

@@ -504,12 +504,13 @@ pub fn run_sync(
                         // answers the same way every pass. Asking again only
                         // churns both logs; a changed payload is uploaded.
                         report.duplicate_ignored += 1;
-                        if verbose {
-                            eprintln!(
-                                "Not uploading {}: the server already holds these bytes",
-                                port_save.path.display()
-                            );
-                        }
+                        // Named every run, not only under --verbose: this skip persists until
+                        // the file changes, and a save that is never uploaded, never rejected
+                        // and never mentioned reads as one the helper does not see.
+                        eprintln!(
+                            "Not uploading {}: the server already holds these bytes",
+                            port_save.path.display()
+                        );
                         continue;
                     }
                     sync_state.duplicate_uploads.remove(&save_key);
@@ -661,12 +662,13 @@ pub fn run_sync(
                         // answers the same way every pass. Asking again only
                         // churns both logs; a changed payload is uploaded.
                         report.duplicate_ignored += 1;
-                        if verbose {
-                            eprintln!(
-                                "Not uploading {}: the server already holds these bytes",
-                                save_path.display()
-                            );
-                        }
+                        // Named every run, not only under --verbose: this skip persists until
+                        // the file changes, and a save that is never uploaded, never rejected
+                        // and never mentioned reads as one the helper does not see.
+                        eprintln!(
+                            "Not uploading {}: the server already holds these bytes",
+                            save_path.display()
+                        );
                         continue;
                     }
                     sync_state.duplicate_uploads.remove(&save_key);
