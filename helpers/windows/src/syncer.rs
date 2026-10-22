@@ -780,12 +780,13 @@ fn restore_cloud_only_saves(
         let page = match api.list_saves(limit, offset, app_password) {
             Ok(page) => page,
             Err(err) => {
-                if verbose {
-                    eprintln!(
-                        "Cloud restore skipped for source '{}': /saves unavailable ({})",
-                        source_name, err
-                    );
-                }
+                // A restore that never ran is the failure mode nobody notices:
+                // the run reports success and the device simply does not
+                // restore. Say it every time, not only under --verbose.
+                eprintln!(
+                    "Cloud restore skipped for source '{}': /saves unavailable ({})",
+                    source_name, err
+                );
                 return Ok(());
             }
         };
@@ -1400,30 +1401,98 @@ fn existing_cloud_target_for_alias(
         {
             continue;
         }
-        let candidate = path.join(filename);
-        if !candidate.exists() {
-            continue;
-        }
-        let known = known_saves
-            .get(candidate.to_string_lossy().as_ref())
-            .and_then(|entry| entry.system_slug.as_deref())
-            .map(|slug| slug == system_slug)
-            .unwrap_or(false);
-        if known {
+        let exact = path.join(filename);
+        if known_save_for_system(&exact, system_slug, known_saves) {
             eprintln!(
                 "Restoring into {}: it already holds this {} save",
-                candidate.display(),
+                exact.display(),
                 system_slug
             );
-            return Some(candidate);
+            return Some(exact);
         }
-        eprintln!(
-            "Not restoring into {}: it holds a file this helper has not synced as {}",
-            candidate.display(),
-            system_slug
-        );
+        if exact.exists() {
+            eprintln!(
+                "Not restoring into {}: it holds a file this helper has not synced as {}",
+                exact.display(),
+                system_slug
+            );
+        }
+
+        // The record's filename carries the extension its profile declares, and
+        // that is not always the one the core writes: genesis-plus-gx is listed
+        // with ".sav" while the device holds ".srm". Matching the stem keeps a
+        // profile that disagrees with the core from silently defeating the
+        // write-back; the state still decides which file is this system's, and
+        // two known files on one stem is a guess this helper does not make.
+        let mut matches: Vec<PathBuf> = std::fs::read_dir(path)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|entry| entry.is_file())
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .map(|name| same_save_stem(name, filename))
+                            .unwrap_or(false)
+                    })
+                    .filter(|entry| known_save_for_system(entry, system_slug, known_saves))
+                    .collect()
+            })
+            .unwrap_or_default();
+        matches.sort();
+        match matches.len() {
+            0 => {}
+            1 => {
+                eprintln!(
+                    "Restoring into {}: it already holds this {} save under another extension",
+                    matches[0].display(),
+                    system_slug
+                );
+                return Some(matches[0].clone());
+            }
+            _ => {
+                eprintln!(
+                    "More than one file in {} holds the {} stem: {}; using the system directory instead",
+                    path.display(),
+                    save_stem(filename),
+                    matches
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
     }
     None
+}
+
+/// Whether the helper's own state records `path` as a save of `system_slug`.
+fn known_save_for_system(
+    path: &Path,
+    system_slug: &str,
+    known_saves: &HashMap<String, SyncedEntry>,
+) -> bool {
+    known_saves
+        .get(path.to_string_lossy().as_ref())
+        .and_then(|entry| entry.system_slug.as_deref())
+        .map(|slug| slug == system_slug)
+        .unwrap_or(false)
+}
+
+/// The filename without its extension: "Sonic (USA).srm" and "Sonic (USA).sav"
+/// are the same save under two profiles' spellings of it.
+fn save_stem(filename: &str) -> &str {
+    Path::new(filename)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(filename)
+}
+
+fn same_save_stem(candidate: &str, reference: &str) -> bool {
+    Path::new(candidate).extension().is_some() && save_stem(candidate) == save_stem(reference)
 }
 
 fn preferred_system_directory_for_root(

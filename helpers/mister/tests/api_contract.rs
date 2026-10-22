@@ -3951,6 +3951,163 @@ fn a_cloud_save_is_restored_into_the_directory_that_already_holds_it() {
     );
 }
 
+// The server's downloadProfiles entry declares the extension, and a profile can
+// disagree with the core: genesis-plus-gx is listed with ".sav" while every
+// device holds ".srm". Matching the record's filename exactly then misses the
+// file that is already there and the restore falls back to a system directory
+// the core never uses.
+#[test]
+fn a_cloud_save_is_restored_where_its_stem_already_lives_under_another_extension() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_stem","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"stem@example.com"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":1,"limit":100,"offset":0,"saves":[{"id":"save-defenders","filename":"Defenders of Oasis (USA, Europe).sav","displayTitle":"Defenders of Oasis","systemSlug":"game-gear","sha256":"701641b95e5e7394","version":3,"latestSizeBytes":65536,"downloadProfiles":[{"id":"original","label":"Original","targetExtension":".sav"}]}]}"#);
+    });
+    let download = server.mock(|when, then| {
+        when.method(GET).path("/saves/download");
+        then.status(200).body(vec![0xC7u8; 65536]);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let local = root.join("saves/genesis/Defenders of Oasis (USA, Europe).srm");
+    fs::write(&local, vec![0x11u8; 65536]).unwrap();
+    writeback_state(&state_dir, &local, "game-gear");
+    let config = writeback_config(&tmp, &server, &root, &state_dir);
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("stem@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(download.calls(), 1, "the restore was skipped:\n{stderr}");
+    assert_eq!(
+        fs::read(&local).unwrap(),
+        vec![0xC7u8; 65536],
+        "the save was restored somewhere else:\n{stderr}"
+    );
+    assert!(
+        !root.join("saves/gamegear").exists(),
+        "a new system directory was created:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("under another extension"),
+        "the restore does not say which file it used:\n{stderr}"
+    );
+}
+
+// A /saves response the client cannot read means no restore runs at all. That
+// used to be reported only under --verbose, so the run looked clean while the
+// device restored nothing.
+#[test]
+fn an_unreadable_save_list_is_reported_not_swallowed() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_unreadable","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"unreadable@example.com"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    // A downloadProfiles entry without its id: the client cannot deserialize
+    // this, and must say so rather than restore nothing in silence.
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":1,"limit":100,"offset":0,"saves":[{"id":"save-defenders","filename":"Defenders of Oasis (USA, Europe).sav","displayTitle":"Defenders of Oasis","systemSlug":"game-gear","sha256":"701641b95e5e7394","version":3,"latestSizeBytes":65536,"downloadProfiles":[{"targetExtension":".sav"}]}]}"#);
+    });
+    let download = server.mock(|when, then| {
+        when.method(GET).path("/saves/download");
+        then.status(200).body(vec![0xC7u8; 65536]);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let local = root.join("saves/genesis/Defenders of Oasis (USA, Europe).srm");
+    fs::write(&local, vec![0x11u8; 65536]).unwrap();
+    writeback_state(&state_dir, &local, "game-gear");
+    let config = writeback_config(&tmp, &server, &root, &state_dir);
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("unreadable@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        download.calls(),
+        0,
+        "a save was restored from an unreadable list:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Cloud restore skipped") && stderr.contains("/saves unavailable"),
+        "the skipped restore is not reported without --verbose:\n{stderr}"
+    );
+}
+
 // A same-named save in the write-back directory may belong to another
 // system; the helper must not overwrite it on a name match alone.
 #[test]
