@@ -604,9 +604,7 @@ pub fn run_sync(
                         // the save would be accepted, and recording it permanently froze
                         // saves whose declared profile belonged to another system until the
                         // marker expired.
-                        let refused_upload = err
-                            .chain()
-                            .any(|cause| cause.to_string().starts_with("POST /saves"));
+                        let refused_upload = refusal_is_about_the_save(&err);
                         if let Some(status) =
                             permanent_rejection_status(&err).filter(|_| refused_upload)
                         {
@@ -760,6 +758,18 @@ fn permanent_rejection_status(err: &anyhow::Error) -> Option<u16> {
 /// an unrouted path, an empty 5xx -- says nothing about the save, and treating
 /// one as terminal marks every save in a pass as permanently refused the first
 /// time the server or a route in front of it is misconfigured.
+/// Whether a refusal is about the save itself. Only an error from the upload
+/// request qualifies; a lookup or conflict check the server refuses says
+/// nothing about whether the save would be accepted. The type says so, not the
+/// message -- rewording what the operator reads cannot change the decision.
+fn refusal_is_about_the_save(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::api::UploadRequestError>()
+            .is_some()
+    })
+}
+
 fn carries_save_scoped_refusal(message: &str) -> bool {
     let Some((_, body)) = message.split_once("body=") else {
         return false;
@@ -5311,6 +5321,17 @@ mod tests {
         let _held = SyncLock::acquire(state_dir).expect("first acquire");
         let err = SyncLock::acquire(state_dir).expect_err("second acquire should bail");
         assert!(format!("{err}").contains("sync is al actief"));
+    }
+
+    #[test]
+    fn a_refusal_is_about_the_save_only_when_the_upload_returned_it() {
+        let upload = anyhow::Error::new(crate::api::UploadRequestError(anyhow::anyhow!(
+            "status=400 and the save was refused"
+        )));
+        assert!(refusal_is_about_the_save(&upload));
+
+        let lookup = anyhow::anyhow!("GET /save/latest: HTTP request faalde: status=400");
+        assert!(!refusal_is_about_the_save(&lookup));
     }
 
     #[test]
