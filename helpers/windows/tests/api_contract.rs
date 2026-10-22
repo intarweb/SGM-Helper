@@ -5223,7 +5223,8 @@ fn a_save_root_used_as_a_rom_root_is_dropped_without_a_missing_warning() {
     let state_dir = tmp.path().join("state");
     fs::create_dir_all(&state_dir).unwrap();
     fs::create_dir_all(&root).unwrap();
-    let saves = root.join("saves");
+    // The directory the source names as both roots does not exist: the arcade's
+    // shape, and the one where a reprimand and a drop could both appear.
     let config = tmp.path().join("config-root.ini");
     fs::write(
         &config,
@@ -5237,7 +5238,6 @@ fn a_save_root_used_as_a_rom_root_is_dropped_without_a_missing_warning() {
         ),
     )
     .unwrap();
-    fs::create_dir_all(&saves).unwrap();
 
     wb_helper()
         .arg("--config")
