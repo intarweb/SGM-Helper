@@ -1655,9 +1655,13 @@ fn n64_controller_pak_bank_count(bytes: &[u8]) -> Option<u8> {
 }
 
 fn n64_controller_pak_note_name_is_blank(note: &[u8]) -> bool {
+    // 0xFF is erased flash: a MiSTer writes blank controller-pak templates
+    // filled with it, and counting those as names made every blank pak look
+    // like sixteen saved notes -- the helper uploaded four per pass and the
+    // server refused each one as "does not contain any save entries".
     note[N64_PAK_NOTE_NAME..]
         .iter()
-        .all(|byte| *byte == 0x00 || *byte == N64_PAK_FONT_SPACE)
+        .all(|byte| *byte == 0x00 || *byte == 0xFF || *byte == N64_PAK_FONT_SPACE)
 }
 
 fn looks_like_executable_or_archive(path: &Path) -> bool {
@@ -3426,6 +3430,23 @@ mod tests {
             sector[30..32].copy_from_slice(&0xfff2u16.wrapping_sub(sum).to_be_bytes());
         }
         pak
+    }
+
+    #[test]
+    fn an_erased_controller_pak_holds_no_entries() {
+        // A MiSTer writes blank controller-pak templates filled with 0xFF.
+        // Counting 0xFF names as real made every blank pak look like sixteen
+        // saved notes, so the helper uploaded four per pass and the server
+        // refused each with "does not contain any save entries".
+        let mut pak = controller_pak(&[]);
+        let notes_offset = (1 + 2) * N64_PAK_PAGE_SIZE;
+        for index in 0..N64_PAK_NOTE_COUNT {
+            let base = notes_offset + index * N64_PAK_NOTE_SIZE;
+            for byte in &mut pak[base..base + N64_PAK_NOTE_SIZE] {
+                *byte = 0xFF;
+            }
+        }
+        assert_eq!(n64_controller_pak_entry_count(&pak), Some(0));
     }
 
     #[test]
