@@ -13,10 +13,10 @@ use crate::config::AppConfig;
 use crate::scanner::{
     RomIndexEntry, SaveAdapterProfile, SaveContainerFormat, classify_supported_save,
     discover_rom_index, discover_save_files, dreamcast_skip_reason,
-    encode_download_for_local_container, filename_stem, is_mame_nvram_component, md5_file,
-    n64_controller_pak_entry_count, normalize_save_bytes_for_sync, normalize_save_for_sync,
-    saturn_skip_reason, sha1_file, sha256_bytes, sha256_file, wii_skip_reason,
-    wii_title_code_from_path,
+    encode_download_for_local_container, filename_stem, is_mame_nvram_component,
+    mame_nvram_machine, md5_file, n64_controller_pak_entry_count, normalize_save_bytes_for_sync,
+    normalize_save_for_sync, saturn_skip_reason, sha1_file, sha256_bytes, sha256_file,
+    wii_skip_reason, wii_title_code_from_path,
 };
 use crate::sources::{EmulatorProfile, SourceKind, prepare_sources_for_sync};
 use crate::state::{
@@ -1443,6 +1443,22 @@ fn process_single_save(
         return Ok(None);
     };
     let system_slug = classification.system_slug;
+    // A MAME nvram component is named after its slot inside one machine --
+    // eeprom, game, bmcu_mcu -- and every machine carries files with those
+    // names. The machine names the romset, so the rom lookup uses it rather
+    // than the file stem, and the upload says which machine the save belongs
+    // to.
+    let arcade_machine = if system_slug == "arcade" {
+        mame_nvram_machine(save_path)
+    } else {
+        None
+    };
+    let rom_stem = arcade_machine.clone().unwrap_or_else(|| stem.clone());
+    let rom_stem_key = rom_stem.to_ascii_lowercase();
+    let rom_entry_for_rom = arcade_machine
+        .as_ref()
+        .and_then(|machine| rom_index.get(&machine.to_ascii_lowercase()))
+        .or(rom_entry);
     let classification_evidence = classification.evidence;
     if !source_allows_system(source_systems, &system_slug) {
         report.skipped += 1;
@@ -1525,7 +1541,7 @@ fn process_single_save(
     let mut rom_md5: Option<String> = None;
 
     if rom_sha1.is_none() {
-        let lookup = api.lookup_rom(&stem).ok();
+        let lookup = api.lookup_rom(&rom_stem).ok();
         rom_sha1 = lookup
             .as_ref()
             .and_then(|value| value.rom.as_ref())
@@ -1536,16 +1552,16 @@ fn process_single_save(
             .and_then(|value| value.md5.clone());
 
         if rom_sha1.is_none()
-            && let Some(rom_entry) = rom_entry
+            && let Some(rom_entry) = rom_entry_for_rom
         {
-            if let Some((cached_sha1, cached_md5)) = rom_hash_cache.get(&stem_key).cloned() {
+            if let Some((cached_sha1, cached_md5)) = rom_hash_cache.get(&rom_stem_key).cloned() {
                 rom_sha1 = Some(cached_sha1);
                 rom_md5 = Some(cached_md5);
             } else {
                 let local_rom_sha1 = sha1_file(&rom_entry.path)?;
                 let local_rom_md5 = md5_file(&rom_entry.path)?;
                 rom_hash_cache.insert(
-                    stem_key.clone(),
+                    rom_stem_key.clone(),
                     (local_rom_sha1.clone(), local_rom_md5.clone()),
                 );
                 rom_sha1 = Some(local_rom_sha1);
@@ -1557,7 +1573,7 @@ fn process_single_save(
     let Some(active_rom_sha1) = rom_sha1 else {
         report.skipped += 1;
         if verbose {
-            eprintln!("No ROM mapping found for save {}", stem);
+            eprintln!("No ROM mapping found for save {}", rom_stem);
         }
         return Ok(None);
     };
@@ -1651,6 +1667,7 @@ fn process_single_save(
             app_password,
             &system_slug,
             wii_title_code_from_path(save_path).as_deref(),
+            arcade_machine.as_deref(),
             &runtime_target,
             verbose,
         );
@@ -1731,6 +1748,7 @@ fn process_single_save(
             app_password,
             &system_slug,
             wii_title_code_from_path(save_path).as_deref(),
+            arcade_machine.as_deref(),
             &runtime_target,
             verbose,
         );
@@ -1840,6 +1858,7 @@ fn process_single_save(
                 app_password,
                 Some(&system_slug),
                 wii_title_code_from_path(save_path).as_deref(),
+                arcade_machine.as_deref(),
                 Some(&runtime_target),
             )?;
             report.uploaded += 1;
@@ -1897,6 +1916,7 @@ fn process_single_save(
                     app_password,
                     Some(&system_slug),
                     wii_title_code_from_path(save_path).as_deref(),
+                    arcade_machine.as_deref(),
                     Some(&runtime_target),
                 )?;
                 report.uploaded += 1;
@@ -1989,6 +2009,7 @@ fn process_single_save(
                     app_password,
                     Some(&system_slug),
                     wii_title_code_from_path(save_path).as_deref(),
+                    arcade_machine.as_deref(),
                     Some(&runtime_target),
                 )?;
                 report.uploaded += 1;
@@ -2977,6 +2998,7 @@ fn upload_with_n64_mister_cpk_fallback(
     app_password: Option<&str>,
     system_slug: &str,
     wii_title_id: Option<&str>,
+    machine: Option<&str>,
     runtime_target: &RuntimeTarget,
     verbose: bool,
 ) -> Result<Option<UploadedSave>> {
@@ -2991,6 +3013,7 @@ fn upload_with_n64_mister_cpk_fallback(
         app_password,
         Some(system_slug),
         wii_title_id,
+        machine,
         Some(runtime_target),
     );
     let upload_response = match upload_result {
@@ -3016,6 +3039,7 @@ fn upload_with_n64_mister_cpk_fallback(
                     app_password,
                     Some(system_slug),
                     wii_title_id,
+                    machine,
                     Some(runtime_target),
                 )?
             } else {

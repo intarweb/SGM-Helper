@@ -1338,3 +1338,100 @@ fn a_success_body_without_a_version_is_still_a_stored_save() {
         "a stored save without a version was counted as discarded: {stdout}"
     );
 }
+
+#[test]
+fn an_arcade_save_sends_the_machine_it_belongs_to() {
+    // A MAME save lives at nvram/<machine>/<file>; the file name is the
+    // machine's own filename and says nothing about the game. The server names
+    // the record after what the helper sends, so the machine travels with the
+    // upload -- otherwise a restore writes the save into a directory no
+    // machine reads.
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_arcade","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"arcade@example.com"}}"#);
+    });
+    // The romset is the machine, not the file: a nvram component's own name
+    // (29f016a) matches no rom anywhere.
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET)
+            .path("/rom/lookup")
+            .query_param("filenameStem", "galaga");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"arc123","md5":"md5v","fileName":"galaga.zip"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _config_sync = server.mock(|when, then| {
+        when.method(POST).path("/helpers/config/sync");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"accepted":true}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST)
+            .path("/saves")
+            .body_includes("name=\"machine\"")
+            .body_includes("galaga");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-arc","sha256":"sha-arc","version":1}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("nvram/galaga")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(root.join("nvram/galaga/29f016a.27h"), vec![0x11u8; 4096]).unwrap();
+
+    let config_path = tmp.path().join("config.ini");
+    let body = format!(
+        "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.arcade]\nLABEL=\"Arcade nvram\"\nKIND=\"mister-fpga\"\nPROFILE=\"mister\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"arcade\"\n",
+        server.port(),
+        root.display(),
+        state_dir.display(),
+        root.join("nvram").display(),
+        root.join("roms").display()
+    );
+    fs::write(&config_path, body).unwrap();
+
+    Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config_path)
+        .arg("login")
+        .arg("--email")
+        .arg("arcade@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config_path)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        upload.calls(),
+        1,
+        "the arcade upload carried no machine; sync said: {stdout}"
+    );
+}

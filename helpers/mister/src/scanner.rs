@@ -1244,6 +1244,19 @@ fn system_slug_from_save_extension(ext: &str) -> Option<&'static str> {
 ///
 /// Both separators, because the scanner runs on Windows and on Linux and the
 /// paths it sees are whichever the device uses.
+/// The machine a MAME nvram component belongs to: the directory under
+/// `nvram/`, i.e. the romset's short name.
+pub(crate) fn mame_nvram_machine(save_path: &Path) -> Option<String> {
+    if !is_mame_nvram_component(save_path) {
+        return None;
+    }
+    save_path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+}
+
 pub(crate) fn is_mame_nvram_component(save_path: &Path) -> bool {
     let normalized = save_path.to_string_lossy().replace('\\', "/");
     let lowered = normalized.to_ascii_lowercase();
