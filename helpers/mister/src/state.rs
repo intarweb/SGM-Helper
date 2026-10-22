@@ -62,6 +62,33 @@ pub struct TerminalRejection {
     pub status: u16,
     pub reason: String,
     pub recorded_at: String,
+    /// The helper release that recorded the refusal. A marker from another
+    /// release is probed again: the fix that makes a save acceptable usually
+    /// ships in the helper or in the server it talks to, and the marker is
+    /// keyed on bytes that never change.
+    #[serde(default)]
+    pub helper_version: Option<String>,
+}
+
+/// How long a refusal is trusted when it comes from the running release. Past
+/// this, the save is presented to the server again: a refusal is a statement
+/// about the server at one moment, and a marker with no expiry keeps a fixed
+/// server looking broken forever.
+pub const TERMINAL_REJECTION_LIFETIME_DAYS: i64 = 14;
+
+/// Whether a recorded refusal still stands: it has to come from this release
+/// and be younger than the lifetime. A marker written before the release was
+/// recorded cannot be dated to a version, so it is treated as stale -- which
+/// is how the markers left by older builds get cleared.
+pub fn terminal_rejection_is_current(prior: &TerminalRejection) -> bool {
+    if prior.helper_version.as_deref() != Some(env!("CARGO_PKG_VERSION")) {
+        return false;
+    }
+    let Ok(recorded_at) = OffsetDateTime::parse(&prior.recorded_at, &Rfc3339) else {
+        return false;
+    };
+    OffsetDateTime::now_utc() - recorded_at
+        <= time::Duration::days(TERMINAL_REJECTION_LIFETIME_DAYS)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,6 +314,48 @@ pub fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rejection(recorded_at: String, helper_version: Option<&str>) -> TerminalRejection {
+        TerminalRejection {
+            sha256: "sha".to_string(),
+            status: 422,
+            reason: "size".to_string(),
+            recorded_at,
+            helper_version: helper_version.map(ToString::to_string),
+        }
+    }
+
+    #[test]
+    fn a_refusal_from_this_release_still_stands() {
+        assert!(terminal_rejection_is_current(&rejection(
+            now_rfc3339(),
+            Some(env!("CARGO_PKG_VERSION"))
+        )));
+    }
+
+    #[test]
+    fn a_refusal_from_another_release_is_stale() {
+        assert!(!terminal_rejection_is_current(&rejection(
+            now_rfc3339(),
+            Some("0.0.1")
+        )));
+    }
+
+    #[test]
+    fn a_refusal_without_a_release_is_stale() {
+        assert!(!terminal_rejection_is_current(&rejection(
+            now_rfc3339(),
+            None
+        )));
+    }
+
+    #[test]
+    fn an_old_refusal_is_stale_however_it_was_recorded() {
+        assert!(!terminal_rejection_is_current(&rejection(
+            "2020-01-01T00:00:00Z".to_string(),
+            Some(env!("CARGO_PKG_VERSION"))
+        )));
+    }
 
     #[test]
     fn corrupt_state_is_reset_and_backed_up() {

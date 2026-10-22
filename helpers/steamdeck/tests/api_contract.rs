@@ -3150,3 +3150,206 @@ fn a_rename_of_a_synced_save_is_not_uploaded_again() {
     );
 }
 
+fn expiry_helper() -> Command {
+    Command::cargo_bin("sgm-steamdeck-helper").unwrap()
+}
+
+fn fork23_state_file(
+    state_dir: &std::path::Path,
+    save_path: &std::path::Path,
+    recorded_at: &str,
+    helper_version: Option<&str>,
+) {
+    use sha2::Digest as _;
+    let bytes = fs::read(save_path).unwrap();
+    let sha = hex::encode(sha2::Sha256::digest(&bytes));
+    let mut rejection = serde_json::json!({
+        "sha256": sha,
+        "status": 422,
+        "reason": r#"HTTP request faalde: status=422 Unprocessable Entity body={"error":"genesis raw save size 2114 is not recognized"}"#,
+        "recorded_at": recorded_at,
+    });
+    if let Some(version) = helper_version {
+        rejection["helper_version"] = serde_json::json!(version);
+    }
+    let mut rejections = serde_json::Map::new();
+    rejections.insert(save_path.to_string_lossy().to_string(), rejection);
+    let state = serde_json::json!({
+        "entries": {},
+        "terminal_rejections": rejections,
+        "duplicate_uploads": {},
+    });
+    fs::write(
+        state_dir.join("sync_state.json"),
+        serde_json::to_string_pretty(&state).unwrap(),
+    )
+    .unwrap();
+}
+
+fn fork23_now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap()
+}
+
+// A refusal is a statement about the server at one moment, and the marker that
+// remembers it is keyed on bytes that never change. Without an expiry, a server
+// fixed afterwards is never asked again, and the log line reads as a live
+// refusal. A marker recorded by another release is presented to the server once
+// more.
+#[test]
+fn a_refusal_recorded_by_another_release_is_probed_again() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_reprobe","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"reprobe@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"reprobe-sha1","md5":"md5v","fileName":"madden.rom"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-reprobe","sha256":"sha-reprobe","version":1}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Sega/Genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let save = root.join("Sega/Genesis/Madden NFL '94 (USA, Europe).srm");
+    fs::write(&save, vec![0xC7u8; 2114]).unwrap();
+    fork23_state_file(&state_dir, &save, &fork23_now_rfc3339(), Some("0.0.1"));
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    expiry_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("reprobe@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = expiry_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        upload.calls(),
+        1,
+        "a refusal from another release was never presented to the server again:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Re-probing"),
+        "the retry does not say the refusal was stale:\n{stderr}"
+    );
+}
+
+// The control: a refusal from this release, recorded recently, is still trusted
+// -- but the log line says when it was recorded, so a fixed server cannot look
+// like a present-tense refusal.
+#[test]
+fn a_refusal_from_this_release_is_not_probed_again() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_hold","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"hold@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"hold-sha1","md5":"md5v","fileName":"madden.rom"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-hold","sha256":"sha-hold","version":1}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Sega/Genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let save = root.join("Sega/Genesis/Madden NFL '94 (USA, Europe).srm");
+    fs::write(&save, vec![0xC7u8; 2114]).unwrap();
+    let recorded_at = fork23_now_rfc3339();
+    fork23_state_file(
+        &state_dir,
+        &save,
+        &recorded_at,
+        Some(env!("CARGO_PKG_VERSION")),
+    );
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    expiry_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("hold@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = expiry_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        upload.calls(),
+        0,
+        "a current refusal was probed again:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Not retrying") && stderr.contains(&recorded_at),
+        "the skip line does not date the refusal:\n{stderr}"
+    );
+}

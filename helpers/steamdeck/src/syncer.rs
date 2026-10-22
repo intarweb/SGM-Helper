@@ -24,7 +24,7 @@ use crate::sources::{EmulatorProfile, SourceKind, prepare_sources_for_sync};
 use crate::state::{
     AuthState, RememberedBackendPolicy, SyncedEntry, TerminalRejection,
     load_remembered_backend_policy, load_sync_state, now_rfc3339, save_remembered_backend_policy,
-    save_sync_state,
+    save_sync_state, terminal_rejection_is_current,
 };
 
 #[derive(Debug, Clone)]
@@ -503,12 +503,28 @@ pub fn run_sync(
                 // drop it and process the save again.  Devices that ran the older build
                 // carry those markers in their state already.
                 if let Some(prior) = prior_rejection {
-                    if carries_save_scoped_refusal(&prior.reason) {
+                    if !terminal_rejection_is_current(&prior) {
+                        // The refusal was recorded by another release, or long enough
+                        // ago that the server may have changed under it. Asking again
+                        // costs one request; not asking is how a fixed server stayed
+                        // "refusing" for two sessions.
+                        eprintln!(
+                            "Re-probing {}: the refusal recorded {} by helper {} is no longer current",
+                            save_path.display(),
+                            prior.recorded_at,
+                            prior
+                                .helper_version
+                                .as_deref()
+                                .unwrap_or("before versioning")
+                        );
+                        sync_state.terminal_rejections.remove(&save_key);
+                    } else if carries_save_scoped_refusal(&prior.reason) {
                         report.rejected_permanent += 1;
                         eprintln!(
-                            "Not retrying {}: the server refused it with {}{}",
+                            "Not retrying {}: the server refused it with {} on {}{}",
                             save_path.display(),
                             prior.status,
+                            prior.recorded_at,
                             if prior.reason.is_empty() {
                                 String::new()
                             } else {
@@ -516,8 +532,9 @@ pub fn run_sync(
                             }
                         );
                         continue;
+                    } else {
+                        sync_state.terminal_rejections.remove(&save_key);
                     }
-                    sync_state.terminal_rejections.remove(&save_key);
                 }
 
                 if let Some(prior_sha) = sync_state.duplicate_uploads.get(&save_key).cloned() {
@@ -594,6 +611,7 @@ pub fn run_sync(
                                     status,
                                     reason: format!("{err:#}"),
                                     recorded_at: now_rfc3339(),
+                                    helper_version: Some(env!("CARGO_PKG_VERSION").to_string()),
                                 },
                             );
                         } else {
