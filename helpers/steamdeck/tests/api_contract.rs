@@ -4806,6 +4806,89 @@ fn a_restore_does_not_retarget_onto_a_file_belonging_to_another_system() {
     );
 }
 
+// A cloud save the device already holds is the common case, and it used to be
+// the quietest one: the restore returned without a line, so a restore that
+// never ran looked the same as one with nothing to do.
+#[test]
+fn a_cloud_save_already_held_is_named_under_verbose() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_held","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"held@example.com"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":1,"limit":100,"offset":0,"saves":[{"id":"save-smw","filename":"Super Mario World (USA).srm","displayTitle":"Super Mario World","systemSlug":"snes","sha256":"cccccccccccccccc","version":2,"latestSizeBytes":32768}]}"#);
+    });
+    let download = server.mock(|when, then| {
+        when.method(GET).path("/saves/download");
+        then.status(200).body(vec![0xC7u8; 32768]);
+    });
+    let _upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-smw","sha256":"cccccccccccccccc"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/snes")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("saves/snes/Super Mario World (USA).srm"),
+        vec![0xA5u8; 32768],
+    )
+    .unwrap();
+    let config = writeback_config_for(&tmp, &server, &root, &state_dir, "snes");
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("held@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .arg("--verbose")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        download.calls(),
+        0,
+        "a save the device holds was downloaded again:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("already holds this save"),
+        "the restore said nothing about the save it skipped:\n{stderr}"
+    );
+}
+
 // A same-named save in the write-back directory may belong to another
 // system; the helper must not overwrite it on a name match alone.
 #[test]

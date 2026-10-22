@@ -960,6 +960,13 @@ fn restore_single_cloud_save(
     );
 
     if existing_local_save_is_valid(&provisional_path, &system_slug) {
+        if verbose {
+            eprintln!(
+                "Cloud restore for {}: {} already holds this save",
+                system_slug,
+                provisional_path.display()
+            );
+        }
         return Ok(());
     }
 
@@ -978,6 +985,13 @@ fn restore_single_cloud_save(
     if native_target_path != provisional_path
         && existing_local_save_is_valid(&native_target_path, &system_slug)
     {
+        if verbose {
+            eprintln!(
+                "Cloud restore for {}: {} already holds this save",
+                system_slug,
+                native_target_path.display()
+            );
+        }
         return Ok(());
     }
     if !target_parent_allowed(&provisional_path, save_roots, create_missing_system_dirs) {
@@ -995,10 +1009,24 @@ fn restore_single_cloud_save(
 
     let provisional_key = provisional_path.to_string_lossy().to_string();
     if restored_targets.contains(&provisional_key) {
+        if verbose {
+            eprintln!(
+                "Cloud restore for {}: {} was already restored in this pass",
+                system_slug,
+                provisional_path.display()
+            );
+        }
         return Ok(());
     }
     let native_target_key = native_target_path.to_string_lossy().to_string();
     if native_target_key != provisional_key && restored_targets.contains(&native_target_key) {
+        if verbose {
+            eprintln!(
+                "Cloud restore for {}: {} was already restored in this pass",
+                system_slug,
+                native_target_path.display()
+            );
+        }
         return Ok(());
     }
 
@@ -1050,6 +1078,13 @@ fn restore_single_cloud_save(
     );
 
     if existing_local_save_is_valid(&target_path, &system_slug) {
+        if verbose {
+            eprintln!(
+                "Cloud restore for {}: {} already holds this save",
+                system_slug,
+                target_path.display()
+            );
+        }
         return Ok(());
     }
     if !target_parent_allowed(&target_path, save_roots, create_missing_system_dirs) {
@@ -1067,6 +1102,13 @@ fn restore_single_cloud_save(
 
     let target_key = target_path.to_string_lossy().to_string();
     if restored_targets.contains(&target_key) {
+        if verbose {
+            eprintln!(
+                "Cloud restore for {}: {} was already restored in this pass",
+                system_slug,
+                target_path.display()
+            );
+        }
         return Ok(());
     }
 
