@@ -3919,6 +3919,9 @@ fn a_cloud_save_is_restored_into_the_directory_that_already_holds_it() {
     fs::create_dir_all(&state_dir).unwrap();
     let local = root.join("saves/genesis/Defenders of Oasis (USA, Europe).srm");
     fs::write(&local, vec![0xC7u8; 65536]).unwrap();
+    // The helper has synced this file as a game-gear save before, which is what
+    // makes it safe to write a game-gear record back over it.
+    writeback_state(&state_dir, &local, "game-gear");
     let config = writeback_config(&tmp, &server, &root, &state_dir);
 
     wb_helper()
@@ -3948,10 +3951,10 @@ fn a_cloud_save_is_restored_into_the_directory_that_already_holds_it() {
     );
 }
 
-// Two directories holding the same filename is a guess the helper must not
-// make: writing to either could overwrite another game's save.
+// A same-named save in the write-back directory may belong to another
+// system; the helper must not overwrite it on a name match alone.
 #[test]
-fn an_ambiguous_write_back_refuses_to_guess() {
+fn a_write_back_does_not_overwrite_another_systems_save() {
     let server = MockServer::start();
     let _token = server.mock(|when, then| {
         when.method(POST).path("/auth/token/app-password");
@@ -3985,13 +3988,13 @@ fn an_ambiguous_write_back_refuses_to_guess() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("root");
     let state_dir = tmp.path().join("state");
-    fs::create_dir_all(root.join("saves/core-a")).unwrap();
-    fs::create_dir_all(root.join("saves/core-b")).unwrap();
+    fs::create_dir_all(root.join("saves/genesis")).unwrap();
     fs::create_dir_all(&state_dir).unwrap();
-    let first = root.join("saves/core-a/Defenders of Oasis (USA, Europe).srm");
-    let second = root.join("saves/core-b/Defenders of Oasis (USA, Europe).srm");
-    fs::write(&first, vec![0x11u8; 65536]).unwrap();
-    fs::write(&second, vec![0x22u8; 65536]).unwrap();
+    // A same-named save belonging to another system: Sonic is a Genesis game and
+    // a Game Gear game, and the helper must not write one over the other.
+    let genesis = root.join("saves/genesis/Defenders of Oasis (USA, Europe).srm");
+    fs::write(&genesis, vec![0x11u8; 65536]).unwrap();
+    writeback_state(&state_dir, &genesis, "genesis");
     let config = writeback_config(&tmp, &server, &root, &state_dir);
 
     wb_helper()
@@ -4014,13 +4017,12 @@ fn an_ambiguous_write_back_refuses_to_guess() {
 
     assert_eq!(download.calls(), 0, "a guess was made:\n{stderr}");
     assert!(
-        fs::read(&first).unwrap() == vec![0x11u8; 65536]
-            && fs::read(&second).unwrap() == vec![0x22u8; 65536],
-        "one of the candidate files was overwritten:\n{stderr}"
+        fs::read(&genesis).unwrap() == vec![0x11u8; 65536],
+        "another system's save was overwritten:\n{stderr}"
     );
     assert!(
-        stderr.contains("More than one directory holds"),
-        "the refusal does not name the candidates:\n{stderr}"
+        stderr.contains("has not synced as game-gear"),
+        "the refusal does not say why it declined to write there:\n{stderr}"
     );
 }
 
@@ -4044,4 +4046,13 @@ fn writeback_config(
     )
     .unwrap();
     config
+}
+
+fn writeback_state(state_dir: &std::path::Path, path: &std::path::Path, system_slug: &str) {
+    let state = format!(
+        r#"{{"entries": {{"{}": {{"sha256": "701641b95e5e7394", "rom_sha1": "rom-sha", "version": 3, "system_slug": "{}", "local_container": "native", "adapter_profile": "identity", "source_kind": "retroarch", "source_name": "RetroArch", "slot_name": "default", "updated_at": "2026-01-01T00:00:00Z"}}}}}}"#,
+        path.display(),
+        system_slug
+    );
+    fs::write(state_dir.join("sync_state.json"), state).unwrap();
 }

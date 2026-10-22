@@ -986,13 +986,14 @@ fn restore_single_cloud_save(
         .as_deref()
         .or(runtime_target.runtime_profile.as_deref());
     let target_extension = cloud_target_extension(cloud_save, runtime_profile);
-    let provisional_path = cloud_target_path(
+    let provisional_path = cloud_target_path_with_known(
         cloud_save,
         save_roots,
         source_kind,
         &effective_profile,
         &system_slug,
         target_extension.as_deref(),
+        sync_entries,
     );
 
     if existing_local_save_is_valid(&provisional_path, &system_slug) {
@@ -1265,6 +1266,10 @@ fn extension_from_filename(filename: &str) -> Option<String> {
         .and_then(normalize_extension_value)
 }
 
+/// The restore target without any record of what has been synced; used by the
+/// tests, which have no state to consult. A real restore goes through
+/// `cloud_target_path_with_known`.
+#[cfg(test)]
 fn cloud_target_path(
     cloud_save: &CloudSaveSummary,
     save_roots: &[PathBuf],
@@ -1272,6 +1277,26 @@ fn cloud_target_path(
     source_profile: &EmulatorProfile,
     system_slug: &str,
     target_extension: Option<&str>,
+) -> PathBuf {
+    cloud_target_path_with_known(
+        cloud_save,
+        save_roots,
+        source_kind,
+        source_profile,
+        system_slug,
+        target_extension,
+        &HashMap::new(),
+    )
+}
+
+fn cloud_target_path_with_known(
+    cloud_save: &CloudSaveSummary,
+    save_roots: &[PathBuf],
+    source_kind: &SourceKind,
+    source_profile: &EmulatorProfile,
+    system_slug: &str,
+    target_extension: Option<&str>,
+    known_saves: &HashMap<String, SyncedEntry>,
 ) -> PathBuf {
     let root = select_cloud_restore_root(save_roots);
     if system_slug == "ports"
@@ -1307,6 +1332,7 @@ fn cloud_target_path(
             source_profile,
             system_slug,
             &filename,
+            known_saves,
         ) {
             return existing_target;
         }
@@ -1457,6 +1483,7 @@ fn existing_cloud_target_for_alias(
     source_profile: &EmulatorProfile,
     system_slug: &str,
     filename: &str,
+    known_saves: &HashMap<String, SyncedEntry>,
 ) -> Option<PathBuf> {
     let default_dir = system_directory_for_source(source_kind, source_profile, system_slug);
     let candidates = std::iter::once(default_dir).chain(
@@ -1489,53 +1516,42 @@ fn existing_cloud_target_for_alias(
         .unwrap_or_default();
 
     // A directory the core actually reads from, named by the operator or by the
-    // core itself ("Genesis Plus GX").
+    // core itself ("Genesis Plus GX"). The directory says which core reads the
+    // file, not which system it belongs to: Sonic is a Genesis game and a Game
+    // Gear game, and a same-named file already sitting there may be the other
+    // one. Only a file this helper has synced for this system is this save.
     for (name, path) in &directories {
         let token = normalize_path_token(name);
-        if declared
+        if !declared
             .iter()
             .any(|alias| normalize_path_token(alias) == token)
         {
-            let candidate = path.join(filename);
-            if candidate.exists() {
-                return Some(candidate);
-            }
+            continue;
         }
-    }
-
-    // The general case: a cores-sorted tree this helper has no list for. Look
-    // for the exact filename one level under this root. One match is the file
-    // that is already there; more than one is a guess, and a guess writes over
-    // a save that belongs to another game.
-    let mut matches: Vec<PathBuf> = directories
-        .iter()
-        .map(|(_, path)| path.join(filename))
-        .filter(|candidate| candidate.is_file())
-        .collect();
-    matches.sort();
-    match matches.len() {
-        0 => None,
-        1 => {
+        let candidate = path.join(filename);
+        if !candidate.exists() {
+            continue;
+        }
+        let known = known_saves
+            .get(candidate.to_string_lossy().as_ref())
+            .and_then(|entry| entry.system_slug.as_deref())
+            .map(|slug| slug == system_slug)
+            .unwrap_or(false);
+        if known {
             eprintln!(
-                "Restoring into {}: it already holds {}",
-                matches[0].display(),
-                filename
+                "Restoring into {}: it already holds this {} save",
+                candidate.display(),
+                system_slug
             );
-            matches.pop()
+            return Some(candidate);
         }
-        _ => {
-            eprintln!(
-                "More than one directory holds {}: {}; using the system directory instead",
-                filename,
-                matches
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            None
-        }
+        eprintln!(
+            "Not restoring into {}: it holds a file this helper has not synced as {}",
+            candidate.display(),
+            system_slug
+        );
     }
+    None
 }
 
 fn preferred_system_directory_for_root(
