@@ -3600,3 +3600,101 @@ fn a_backend_policy_does_not_cancel_a_requested_dry_run() {
         "a backend policy turned a requested dry run into a live sync:\n{stdout}\n{stderr}"
     );
 }
+
+fn named_helper() -> Command {
+    Command::cargo_bin("sgm-mister-helper").unwrap()
+}
+
+// A refusal has to say which request produced it. Without that, a report of two
+// uploads under a dry run cannot be matched to the branch that issued them.
+#[test]
+fn a_refusal_names_the_request_it_came_from() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_named","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"named@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"named-sha1","md5":"md5v","fileName":"defenders.rom"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _conflicts = server.mock(|when, then| {
+        when.method(GET).path("/conflicts/check");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false}"#);
+    });
+    let _upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(400)
+            .header("content-type", "application/json")
+            .body(r#"{"error":"Bad Request","message":"runtimeProfile \"genesis/retroarch-genesis-plus-gx\" belongs to genesis, but this save is recorded as game-gear","statusCode":400}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("RetroArch/saves/genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("RetroArch/saves/genesis/Defenders of Oasis (USA, Europe).srm"),
+        vec![0xC7u8; 65536],
+    )
+    .unwrap();
+    let config = tmp.path().join("config-named.ini");
+    fs::write(
+        &config,
+        format!(
+            "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.retroarch]\nLABEL=\"RetroArch\"\nKIND=\"retroarch\"\nPROFILE=\"retroarch\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"genesis\"\n",
+            server.port(),
+            root.display(),
+            state_dir.display(),
+            root.join("RetroArch/saves").display(),
+            root.join("roms").display()
+        ),
+    )
+    .unwrap();
+
+    named_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("named@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = named_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("Refused"),
+        "the refusal was not reported:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("POST /saves (multipart upload)"),
+        "the refusal does not name the request:\n{stderr}"
+    );
+}

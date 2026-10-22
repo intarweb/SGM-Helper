@@ -689,7 +689,10 @@ impl ApiClient {
             .send()
             .context("request naar /saves (multipart) faalde")?;
 
-        parse_json_response(response)
+        // Name the request in the error: a refusal's message otherwise arrives
+        // without saying which call produced it, which is how a dry-run report
+        // of two uploads could not be matched to a branch.
+        parse_json_response(response).with_context(|| "POST /saves (multipart upload)")
     }
 
     pub fn list_saves(
@@ -871,7 +874,7 @@ impl ApiClient {
             .send()
             .context("request naar /conflicts/report faalde")?;
 
-        parse_json_response(response)
+        parse_json_response(response).with_context(|| "POST /conflicts/report")
     }
 
     pub fn sync_helper_config(

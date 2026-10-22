@@ -527,7 +527,7 @@ pub fn run_sync(
                     if let Some(status) = permanent_rejection_status(&err) {
                         report.rejected_permanent += 1;
                         eprintln!(
-                            "Refused {} (status {}): {}",
+                            "Refused {} (status {}): {:#}",
                             save_path.display(),
                             status,
                             err
