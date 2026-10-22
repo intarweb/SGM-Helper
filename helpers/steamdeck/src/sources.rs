@@ -1135,8 +1135,7 @@ fn write_scan_report(
     evaluated: &[EvaluatedCandidate],
 ) -> Result<()> {
     let state_dir = config.resolved_state_dir()?;
-    fs::create_dir_all(&state_dir)
-        .with_context(|| format!("kan state map niet maken: {}", state_dir.display()))?;
+    crate::state::ensure_directory(&state_dir)?;
 
     let report = ScanReport {
         mode: mode.to_string(),

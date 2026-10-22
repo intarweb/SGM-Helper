@@ -304,8 +304,7 @@ pub fn run_sync(
     verbose: bool,
 ) -> Result<SyncReport> {
     let state_dir = config.resolved_state_dir()?;
-    fs::create_dir_all(&state_dir)
-        .with_context(|| format!("kan state map niet maken: {}", state_dir.display()))?;
+    crate::state::ensure_directory(&state_dir)?;
     let _lock = SyncLock::acquire(&state_dir)?;
 
     let mut sync_state = load_sync_state(&state_dir)?;

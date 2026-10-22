@@ -723,8 +723,7 @@ fn ensure_auth_or_auto_enroll(
     }
 
     let state_dir = cfg.resolved_state_dir()?;
-    fs::create_dir_all(&state_dir)
-        .with_context(|| format!("kan state map niet maken: {}", state_dir.display()))?;
+    crate::state::ensure_directory(&state_dir)?;
 
     let api = ApiClient::new(cfg.base_url(), cfg.route_prefix.clone(), None)?;
     let gate_status = match api.auto_enroll_status() {

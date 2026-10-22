@@ -133,6 +133,42 @@ pub fn sync_state_path(state_dir: &Path) -> PathBuf {
 
 /// The last backend policy this device received, so a failed fetch cannot
 /// silently drop a server-forced dry run and sync live.
+/// Create the state directory, treating one that is already there as success.
+///
+/// `create_dir_all` is meant to be indifferent to an existing directory, but on
+/// Windows it can still surface `ERROR_ALREADY_EXISTS` (183): the probe it uses
+/// to decide "that is a directory, then" is a separate call, and when that probe
+/// fails for any reason the original error is what reaches the caller. The state
+/// directory exists after the first run, so every run after that must not die on
+/// it. Probe directly, and retry once in case the first attempt raced another
+/// process creating the same directory.
+pub fn ensure_directory(path: &Path) -> Result<()> {
+    let first = match fs::create_dir_all(path) {
+        Ok(()) => return Ok(()),
+        Err(err) => err,
+    };
+    let obstruction = match fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => return Ok(()),
+        Ok(_) => "a file is in the way",
+        Err(_) => "it could not be created",
+    };
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    if fs::create_dir_all(path).is_ok()
+        || fs::metadata(path)
+            .map(|meta| meta.is_dir())
+            .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    Err(first).with_context(|| {
+        format!(
+            "kan state map niet maken: {} ({})",
+            path.display(),
+            obstruction
+        )
+    })
+}
+
 pub fn backend_policy_path(state_dir: &Path) -> PathBuf {
     state_dir.join("backend_policy.json")
 }
@@ -378,6 +414,38 @@ mod tests {
             "2020-01-01T00:00:00Z".to_string(),
             Some(env!("CARGO_PKG_VERSION"))
         )));
+    }
+
+    #[test]
+    fn an_existing_state_directory_is_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        ensure_directory(&state_dir).unwrap();
+        assert!(state_dir.is_dir());
+    }
+
+    #[test]
+    fn a_state_directory_is_created_when_it_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("a").join("b").join("state");
+
+        ensure_directory(&state_dir).unwrap();
+        assert!(state_dir.is_dir());
+    }
+
+    #[test]
+    fn a_file_where_the_state_directory_belongs_is_named_not_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("state");
+        fs::write(&state_dir, "not a directory").unwrap();
+
+        let err = ensure_directory(&state_dir).unwrap_err().to_string();
+        assert!(
+            err.contains("kan state map niet maken") && err.contains("a file is in the way"),
+            "the failure does not say what is wrong: {err}"
+        );
     }
 
     #[test]
