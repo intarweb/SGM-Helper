@@ -3826,6 +3826,30 @@ fn process_missing_save(
         app_password,
         Some(&runtime_target),
     )?;
+    // The same plausibility rule the download branch applies, before anything is
+    // written: a payload that is not a save of this system at this target's
+    // extension is refused rather than restored. An 8-byte clock state over a
+    // `.srm` is the case that found it.
+    let target_extension = save_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !crate::scanner::is_plausible_save_for_system(
+        &target_extension,
+        canonical_bytes.len() as u64,
+        system_slug,
+    ) {
+        report.refused_size_mismatch += 1;
+        eprintln!(
+            "Refusing to restore missing save {} ({} bytes): that is not a plausible {} save for .{}",
+            save_path.display(),
+            canonical_bytes.len(),
+            system_slug,
+            target_extension
+        );
+        return Ok(None);
+    }
     let local_bytes = encode_download_for_local_container(&canonical_bytes, local_container)?;
     if let Some(parent) = save_path.parent() {
         fs::create_dir_all(parent)

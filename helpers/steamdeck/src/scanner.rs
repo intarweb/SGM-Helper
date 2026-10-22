@@ -1746,7 +1746,7 @@ fn is_plausible_save_size(size: u64) -> bool {
     size > 0 && size <= MAX_SAVE_BYTES
 }
 
-fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
+pub(crate) fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
     if !is_plausible_save_size(size) {
         return false;
     }

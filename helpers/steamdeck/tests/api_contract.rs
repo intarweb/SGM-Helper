@@ -5228,6 +5228,90 @@ fn a_clock_sidecar_says_it_travels_with_its_save() {
     );
 }
 
+// A restore from the state entry has no record filename to read, so the only
+// thing between a projected payload and the disk is a plausibility check. An
+// 8-byte clock state does not belong in a `.srm`, and the file is not written.
+#[test]
+fn a_missing_save_restore_refuses_an_implausible_payload() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_plaus","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"plaus@example.com"}}"#);
+    });
+    let _latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(
+                r#"{"success":true,"exists":true,"sha256":"rtcsha","version":2,"id":"save-rtc"}"#,
+            );
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":0,"limit":100,"offset":0,"saves":[]}"#);
+    });
+    let download = server.mock(|when, then| {
+        when.method(GET).path("/saves/download");
+        then.status(200).body(vec![0x11u8; 8]);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/gbc")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let missing = root.join("saves/gbc/Pokemon - Crystal Version (USA).srm");
+    writeback_state(&state_dir, &missing, "gameboy");
+    let config = writeback_config_for(&tmp, &server, &root, &state_dir, "gameboy");
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("plaus@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        download.calls(),
+        1,
+        "the payload was never fetched:\n{stderr}"
+    );
+    assert!(
+        !missing.exists(),
+        "an implausible payload was written:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("not a plausible gameboy save"),
+        "the refusal does not say why:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("refused_size_mismatch=1"),
+        "the refusal is not counted:\n{stdout}"
+    );
+}
+
 // A same-named save in the write-back directory may belong to another
 // system; the helper must not overwrite it on a name match alone.
 #[test]
