@@ -1365,11 +1365,13 @@ fn is_plausible_save_for_system(ext: &str, size: u64, slug: &str) -> bool {
         // size table here would reject real machines, so the path is the
         // evidence.
         "arcade" => true,
+        // A Sega core writes the SRAM it was given: real carts carry 2 KiB and
+        // 16 KiB banks as well as the power-of-two sizes, and Madden NFL '94
+        // (2114 B) and Shining in the Darkness (16128 B) were dropped as
+        // "unsupported" because of the gap. The extension and the save folder
+        // already say this is a save; its size is the cart's business.
         "genesis" | "master-system" | "game-gear" | "sega-cd" | "sega-32x" => {
-            matches!(
-                size,
-                64 | 128 | 256 | 512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768 | 65536 | 131072
-            )
+            (64..=131_072).contains(&size)
         }
         "saturn" => matches!(
             size as usize,

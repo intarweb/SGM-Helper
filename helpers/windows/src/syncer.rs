@@ -63,6 +63,10 @@ pub struct SyncReport {
     /// Saves the server refused permanently. Not re-attempted until the
     /// payload changes.
     pub rejected_permanent: usize,
+    /// Files that look like saves but that no system profile accepts, or that
+    /// travel with a parent save rather than standing alone. Counted so a
+    /// silent drop cannot happen.
+    pub skipped_by_policy: usize,
     /// Saves the server already held and declined to store: settled without a
     /// write, and reported rather than retried.
     pub duplicate_ignored: usize,
@@ -465,6 +469,10 @@ pub fn run_sync(
                 &api,
                 &save_path,
                 &save_key,
+                sync_state
+                    .entries
+                    .get(&save_key)
+                    .map(|entry| entry.sha256.as_str()),
                 &fingerprint,
                 &source.name,
                 &source.kind,
@@ -622,7 +630,10 @@ fn permanent_rejection_status(err: &anyhow::Error) -> Option<u16> {
     let lowered = message.to_ascii_lowercase();
     let start = lowered.find("status=")? + "status=".len();
     let code: u16 = lowered[start..].split_whitespace().next()?.parse().ok()?;
-    if !(400..500).contains(&code) || code == 408 || code == 429 {
+    // A 404 is a route or a proxy; 401/403 an identity; 408/429 a transient
+    // condition. None of them say anything about this save, and recording one
+    // as terminal takes the save out of sync until its bytes change.
+    if !matches!(code, 400 | 409 | 413 | 415 | 422) {
         return None;
     }
     if !carries_save_scoped_refusal(&message) {
@@ -1484,6 +1495,7 @@ fn process_single_save(
     api: &ApiClient,
     save_path: &std::path::Path,
     save_key: &str,
+    prior_local_sha: Option<&str>,
     fingerprint: &str,
     source_name: &str,
     source_kind: &SourceKind,
@@ -1518,6 +1530,21 @@ fn process_single_save(
             eprintln!("Skipping Saturn save {}: {}", save_path.display(), reason);
         } else if let Some(reason) = wii_skip_reason(save_path) {
             eprintln!("Skipping Wii save {}: {}", save_path.display(), reason);
+        } else if let Some(ext) = save_extension(save_path)
+            && crate::scanner::known_save_extensions().contains(ext.as_str())
+        {
+            // It carries a save extension and a save-shaped name, and no
+            // system profile accepted it. Dropping it quietly is how two real
+            // Sega saves went missing; name it and count it.
+            report.skipped_by_policy += 1;
+            eprintln!(
+                "Skipping save {}: no system profile accepts a {} byte .{} file",
+                save_path.display(),
+                std::fs::metadata(save_path)
+                    .map(|meta| meta.len())
+                    .unwrap_or_default(),
+                ext
+            );
         } else if verbose {
             eprintln!(
                 "Skipping non-supported save (outside allowed console families): {}",
@@ -1593,6 +1620,18 @@ fn process_single_save(
             "Refusing to upload {}: every component of this machine holds the same {} bytes, which is a corruption signal, not a save",
             save_path.display(),
             normalized_save.canonical_bytes.len()
+        );
+        return Ok(None);
+    }
+
+    // The RTC sidecar carries a clock, not a save. Stored alone it becomes a
+    // record that re-uploads and re-downloads every pass, and written to a
+    // sibling name it destroys the save beside it.
+    if save_extension(save_path).as_deref() == Some("rtc") {
+        report.skipped_by_policy += 1;
+        eprintln!(
+            "Skipping {}: the RTC sidecar travels with its save, not as its own record",
+            save_path.display()
         );
         return Ok(None);
     }
@@ -2109,6 +2148,71 @@ fn process_single_save(
         )));
     }
 
+    // The local bytes differ from the record. If this device had the record's
+    // copy at the last sync, the difference is a local edit and belongs on the
+    // server as a new version -- downloading over it would destroy the only
+    // copy of that edit. Without a last-sync record the helper cannot tell
+    // which side moved, and a device with no history is the restore case: the
+    // cloud copy is written, guarded by the size check.
+    let local_edited_since_sync = prior_local_sha
+        .map(|prior| prior != local_sha.as_str())
+        .unwrap_or(false);
+    if local_edited_since_sync {
+        if options.dry_run {
+            report.would_upload += 1;
+            return Ok(Some(processed_entry(
+                state_key.clone(),
+                synced_entry(
+                    local_sha,
+                    Some(active_rom_sha1.clone()),
+                    latest.version,
+                    Some(&system_slug),
+                    Some(normalized_save.local_container),
+                    Some(normalized_save.adapter_profile),
+                    Some(source_kind),
+                    Some(source_name),
+                    Some(&effective_slot_name),
+                ),
+            )));
+        }
+        let filename = upload_filename_for_sync(save_path, &system_slug);
+        let response = api.upload_save(
+            &filename,
+            normalized_save.canonical_bytes.clone(),
+            &active_rom_sha1,
+            rom_md5.as_deref(),
+            &effective_slot_name,
+            device_type,
+            fingerprint,
+            app_password,
+            Some(&system_slug),
+            wii_title_code_from_path(save_path).as_deref(),
+            arcade_machine.as_deref(),
+            Some(&runtime_target),
+        )?;
+        settle_upload(
+            report,
+            save_path,
+            normalized_save.canonical_bytes.len(),
+            None,
+            response.declined_duplicate(),
+        );
+        return Ok(Some(processed_entry(
+            state_key.clone(),
+            synced_entry(
+                local_sha,
+                Some(active_rom_sha1.clone()),
+                latest.version,
+                Some(&system_slug),
+                Some(normalized_save.local_container),
+                Some(normalized_save.adapter_profile),
+                Some(source_kind),
+                Some(source_name),
+                Some(&effective_slot_name),
+            ),
+        )));
+    }
+
     if let Some(save_id) = latest.id {
         if options.dry_run {
             report.would_download += 1;
@@ -2201,7 +2305,7 @@ fn process_single_save(
             normalized_save.local_container,
             Some(canonical_bytes.len() as u64),
         );
-        if system_slug == "arcade"
+        if target_save_path == save_path
             && let Ok(existing) = std::fs::metadata(&target_save_path)
             && existing.is_file()
             && existing.len() != local_bytes.len() as u64
@@ -2212,7 +2316,7 @@ fn process_single_save(
             // save at the wrong length.
             report.refused_size_mismatch += 1;
             eprintln!(
-                "Refusing to write record {} ({} bytes) over {} ({} bytes): an arcade component keeps its size, so this payload belongs to a different component or machine",
+                "Refusing to write record {} ({} bytes) over {} ({} bytes): a save keeps its size, so this payload is a different save or a canonical form the game never wrote",
                 save_id,
                 local_bytes.len(),
                 target_save_path.display(),

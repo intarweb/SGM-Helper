@@ -252,7 +252,7 @@ fn backend_forced_dry_run_marks_the_summary_and_uploads_nothing() {
         stdout.contains(
             "skipped=1 rejected_n64_controller_pak=0 refused_size_mismatch=0 \
              refused_flattened_components=0 accepted_not_stored=0 \
-             rejected_permanent=0 duplicate_ignored=0 errors=0 would_upload=1 would_download=0"
+             rejected_permanent=0 duplicate_ignored=0 skipped_by_policy=1 errors=0 would_upload=1 would_download=0"
         ),
         "a skipped save was counted as a simulated upload, or the simulation was missed: {stdout}"
     );
@@ -2110,5 +2110,166 @@ fn a_duplicate_on_a_converted_save_is_not_uploaded_again() {
         upload.calls(),
         after_first,
         "a converted save the server already held was uploaded again: {stdout}\nSTDERR: {stderr}"
+    );
+}
+
+// Real carts carry 2 KiB and 16 KiB SRAM banks, so a Sega save is not always a
+// power of two. Madden NFL '94 (2114 B) and Shining in the Darkness (16128 B)
+// were dropped as "unsupported" and never reached the server.
+#[test]
+fn a_sega_save_of_an_irregular_size_is_uploaded() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_sega","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"sega@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"sega123","md5":"md5v","fileName":"madden.rom"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-sega","sha256":"sha-sega","version":1}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Sega/Genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("Sega/Genesis/Madden NFL '94 (USA, Europe).srm"),
+        vec![0xC7u8; 2114],
+    )
+    .unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("sega@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        upload.calls(),
+        1,
+        "a real Sega save of an irregular size never reached the server: {stdout}\nSTDERR: {stderr}"
+    );
+}
+
+// The RTC sidecar carries a clock, not a save. As its own record it re-uploads
+// every pass, and written to a sibling name it destroys the save beside it.
+#[test]
+fn an_rtc_sidecar_is_not_uploaded_as_its_own_save() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_rtc","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"rtc@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"rtc123","md5":"md5v","fileName":"crystal.rom"}}"#);
+    });
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-rtc","sha256":"sha-rtc","version":1}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Nintendo/Game Boy Color")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("Nintendo/Game Boy Color/Pokemon Crystal.rtc"),
+        vec![0x13u8; 8],
+    )
+    .unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+
+    Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("rtc@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = Command::cargo_bin("sgm-windows-helper")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        upload.calls(),
+        0,
+        "the RTC sidecar was uploaded as a save: {stdout}\nSTDERR: {stderr}"
+    );
+    assert!(
+        stderr.contains("RTC sidecar travels with its save"),
+        "the sidecar was skipped without saying so: {stderr}"
+    );
+    assert!(
+        stdout.contains("skipped_by_policy=1"),
+        "the sidecar skip is not counted: {stdout}"
     );
 }
