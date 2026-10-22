@@ -969,14 +969,43 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
 
+/// Like `contains_any`, but a bare needle has to name a path component.
+///
+/// The haystack is the whole lowercased path, which includes whatever random
+/// directory a caller put the save under. A substring match on a bare core name
+/// therefore fires on names that have nothing to do with emulation: a fixture
+/// under `.tmpvba8x` reads as Game Boy Advance, one under `.tmpps4q` as a
+/// PlayStation 4. Delimited needles (`/gba/`) and phrases are unchanged; only
+/// bare names are scoped to a component.
+fn contains_any_needle(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| {
+        if needle.contains('/') || needle.contains('\\') || needle.contains(' ') {
+            haystack.contains(needle)
+        } else {
+            haystack.split(['/', '\\']).any(|part| {
+                // A short name is a hazard: `vba`, `ps4`, `vmu` fit inside a
+                // random temp directory. Demand a whole name token for those.
+                // A long name (`mupen`, `megacd`) is safe as a prefix, and
+                // real layouts depend on it: Mupen64Plus-Next, megacdjp.
+                if needle.len() >= 5 {
+                    part.starts_with(needle)
+                } else {
+                    part.split(['-', '_', '.', ' '])
+                        .any(|token| token == *needle)
+                }
+            })
+        }
+    })
+}
+
 fn infer_nintendo_slug(haystack: &str) -> Option<&'static str> {
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &["nintendo wii", "/wii/", "\\wii\\", "dolphin", "rvl"],
     ) {
         return Some("wii");
     }
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &[
             "gameboy advance",
@@ -990,25 +1019,25 @@ fn infer_nintendo_slug(haystack: &str) -> Option<&'static str> {
     ) {
         return Some("gba");
     }
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &["game boy", "gameboy", "/gb/", "\\gb\\", "/gbc/", "\\gbc\\"],
     ) {
         return Some("gameboy");
     }
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &["nintendo ds", "/nds/", "\\nds\\", "melonds", "desmume"],
     ) {
         return Some("nds");
     }
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &["nintendo 64", "/n64/", "\\n64\\", "mupen", "project64"],
     ) {
         return Some("n64");
     }
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &[
             "super nintendo",
@@ -1022,20 +1051,20 @@ fn infer_nintendo_slug(haystack: &str) -> Option<&'static str> {
     ) {
         return Some("snes");
     }
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &["famicom", "/nes/", "\\nes\\", "fceux", "fceumm", "nestopia"],
     ) {
         return Some("nes");
     }
-    if contains_any(haystack, &["n3ds", "/3ds/", "\\3ds\\", "azahar", "citra"]) {
+    if contains_any_needle(haystack, &["n3ds", "/3ds/", "\\3ds\\", "azahar", "citra"]) {
         return Some("3ds");
     }
     None
 }
 
 fn infer_sega_slug(haystack: &str) -> &'static str {
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &[
             "dreamcast",
@@ -1052,16 +1081,16 @@ fn infer_sega_slug(haystack: &str) -> &'static str {
     ) {
         return "dreamcast";
     }
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &["master system", "mastersystem", "/sms/", "\\sms\\"],
     ) {
         return "master-system";
     }
-    if contains_any(haystack, &["game gear", "gamegear", "/gg/", "\\gg\\"]) {
+    if contains_any_needle(haystack, &["game gear", "gamegear", "/gg/", "\\gg\\"]) {
         return "game-gear";
     }
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &[
             "saturn",
@@ -1077,7 +1106,7 @@ fn infer_sega_slug(haystack: &str) -> &'static str {
     ) {
         return "saturn";
     }
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &[
             "mega cd",
@@ -1098,7 +1127,7 @@ fn infer_sega_slug(haystack: &str) -> &'static str {
     ) {
         return "sega-cd";
     }
-    if contains_any(
+    if contains_any_needle(
         haystack,
         &["sega 32x", "sega-32x", "sega32x", "32x", "/32x/", "\\32x\\"],
     ) {
@@ -3466,5 +3495,59 @@ mod tests {
             .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
             .collect();
         assert_eq!(names, vec!["eeprom".to_string(), "game".to_string()]);
+    }
+
+    #[test]
+    fn a_random_directory_name_is_not_a_system_hint() {
+        // The haystack is the whole lowercased path, so a bare core name used
+        // to match whatever random directory a save happened to sit under.
+        // `.tmpvba8x` is not a Game Boy Advance hint and `.tmpps4q` is not a
+        // PlayStation 4.
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp
+            .path()
+            .join(".tmpvba8x/.tmpps4q/azahar/sdmc/Nintendo 3DS/title/00040000/00111b00/data/00000001/bigegg0.sav");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::write(&save, vec![0xffu8; 65536]).unwrap();
+        assert_eq!(
+            infer_nintendo_slug(&save.to_string_lossy().to_ascii_lowercase()),
+            Some("3ds")
+        );
+
+        // A genuine core directory still matches.
+        assert_eq!(infer_nintendo_slug("/saves/mgba/pokemon.sav"), Some("gba"));
+        assert_eq!(infer_nintendo_slug("/saves/vba/pokemon.sav"), Some("gba"));
+    }
+
+    #[test]
+    fn a_directory_that_starts_with_a_core_name_is_not_a_hint() {
+        // `vbatmp` begins with the VBA needle but is not the VBA core, and a
+        // temp directory name is random letters -- a prefix match still lets
+        // one flake through.
+        let tmp = tempfile::tempdir().unwrap();
+        let save = tmp
+            .path()
+            .join("vbatmp/ps4games/azahar/sdmc/Nintendo 3DS/title/00040000/00111b00/data/00000001/bigegg0.sav");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::write(&save, vec![0xffu8; 65536]).unwrap();
+        assert_eq!(
+            infer_nintendo_slug(&save.to_string_lossy().to_ascii_lowercase()),
+            Some("3ds")
+        );
+
+        // Real core directories keep matching, including the separator forms.
+        for (path, slug) in [
+            ("/saves/mgba/pokemon.sav", "gba"),
+            ("/saves/vba/pokemon.sav", "gba"),
+            ("/saves/vba-next/pokemon.sav", "gba"),
+            ("/saves/Dolphin-x64/User/GC/SRAM.raw", "wii"),
+            ("/saves/Mupen64Plus-Next/zelda.sav", "n64"),
+        ] {
+            assert_eq!(
+                infer_nintendo_slug(&path.to_ascii_lowercase()),
+                Some(slug),
+                "{path}"
+            );
+        }
     }
 }
