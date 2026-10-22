@@ -1038,6 +1038,14 @@ fn restore_single_cloud_save(
         .system_profile_value
         .as_deref()
         .or(runtime_target.runtime_profile.as_deref());
+    // The cloud track's own format-class (primary vs sidecar), from its stored
+    // filename: it gates the "already present" checks below, so a local file of
+    // the other class can never satisfy this track's restore.
+    let cloud_is_sidecar = std::path::Path::new(&cloud_save.filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| crate::scanner::is_sidecar(&value.to_ascii_lowercase()))
+        .unwrap_or(false);
     let target_extension = cloud_target_extension(cloud_save, runtime_profile);
     let provisional_path = cloud_target_path_with_known(
         cloud_save,
@@ -1049,7 +1057,7 @@ fn restore_single_cloud_save(
         sync_entries,
     );
 
-    if existing_local_save_is_valid(&provisional_path, &system_slug) {
+    if existing_local_save_is_valid(&provisional_path, &system_slug, cloud_is_sidecar) {
         if verbose {
             eprintln!(
                 "Cloud restore for {}: {} already holds this save",
@@ -1073,7 +1081,7 @@ fn restore_single_cloud_save(
         sync_entries,
     );
     if native_target_path != provisional_path
-        && existing_local_save_is_valid(&native_target_path, &system_slug)
+        && existing_local_save_is_valid(&native_target_path, &system_slug, cloud_is_sidecar)
     {
         if verbose {
             eprintln!(
@@ -1167,7 +1175,7 @@ fn restore_single_cloud_save(
         sync_entries,
     );
 
-    if existing_local_save_is_valid(&target_path, &system_slug) {
+    if existing_local_save_is_valid(&target_path, &system_slug, cloud_is_sidecar) {
         if verbose {
             eprintln!(
                 "Cloud restore for {}: {} already holds this save",
@@ -1565,9 +1573,20 @@ fn wii_title_code_from_candidate(candidate: &str) -> Option<String> {
     None
 }
 
-fn existing_local_save_is_valid(path: &Path, system_slug: &str) -> bool {
+fn existing_local_save_is_valid(path: &Path, system_slug: &str, expect_sidecar: bool) -> bool {
     if system_slug == "ports" {
         return path.is_file() && path.metadata().map(|meta| meta.len() > 0).unwrap_or(false);
+    }
+    // A local file satisfies a cloud track's "already present" check only when
+    // it is the same format-class: a kept controller pak must not stand in for
+    // a cartridge save that has been deleted, or that save is never restored.
+    let local_is_sidecar = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| crate::scanner::is_sidecar(&value.to_ascii_lowercase()))
+        .unwrap_or(false);
+    if local_is_sidecar != expect_sidecar {
+        return false;
     }
     path.exists()
         && classify_supported_save(path, None)
@@ -4907,6 +4926,38 @@ mod tests {
         longer.extend(vec![0x00u8; 16]);
 
         assert!(!same_save_with_padding(&shorter, &longer));
+    }
+
+    #[test]
+    fn existing_local_save_class_gate() {
+        // Controller paks are the class that classifies on this tree -- an
+        // `.rtc` is deliberately never a standalone save -- so they are what the
+        // gate can be proven on. Real files, because a missing path returns
+        // false for the wrong reason and proves nothing.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("saves/n64");
+        fs::create_dir_all(&dir).unwrap();
+        let mpk = dir.join("Mario Kart 64 (USA)_1.mpk");
+        let cpk = dir.join("Mario Kart 64 (USA)_1.cpk");
+        fs::write(&mpk, vec![0xA5u8; 32768]).unwrap();
+        fs::write(&cpk, vec![0xA5u8; 32768]).unwrap();
+
+        assert!(
+            existing_local_save_is_valid(&cpk, "n64", true),
+            "a present sidecar was not accepted for a sidecar track"
+        );
+        assert!(
+            existing_local_save_is_valid(&mpk, "n64", true),
+            "a present controller pak of the record's own container was not accepted"
+        );
+        assert!(
+            !existing_local_save_is_valid(&mpk, "n64", false),
+            "a controller pak satisfied a primary track's presence check"
+        );
+        assert!(
+            !existing_local_save_is_valid(&cpk, "n64", false),
+            "a controller pak satisfied a primary track's presence check"
+        );
     }
 
     fn cloud_save(
