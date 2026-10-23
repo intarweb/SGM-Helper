@@ -4866,6 +4866,91 @@ fn a_restore_lands_in_the_declared_directory() {
     );
 }
 
+// A save can sit directly in the source root with no directory at all. Leaving
+// the root out of the candidate list made those files invisible: not followed,
+// not reported, never synced.
+#[test]
+fn a_save_in_the_source_root_is_a_copy_like_any_other() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_root","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"root@example.com"}}"#);
+    });
+    let _latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":0,"limit":100,"offset":0,"saves":[]}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-root","sha256":"sha-root"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    // The size the arcade's strays have: without a ROM mapping this one does
+    // not classify at all, so the test also proves the save is read from the
+    // root and matched the same way any other save is.
+    fs::write(
+        root.join("saves/Super Mario World 2 - Yoshi Island (USA).srm"),
+        (0..32768u32)
+            .map(|index| ((index as u8).wrapping_mul(37).wrapping_add(5)) | 0x01)
+            .collect::<Vec<u8>>(),
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("roms/snes")).unwrap();
+    fs::write(
+        root.join("roms/snes/Super Mario World 2 - Yoshi Island (USA).sfc"),
+        b"rom",
+    )
+    .unwrap();
+    let config = live_directory_config(&tmp, &server, &root, &state_dir, "");
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("root@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        upload.calls(),
+        1,
+        "a save in the source root did not upload:\n{stderr}"
+    );
+}
+
 fn wb_helper() -> Command {
     Command::cargo_bin("sgm-steamdeck-helper").unwrap()
 }

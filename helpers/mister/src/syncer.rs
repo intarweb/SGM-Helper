@@ -1730,10 +1730,11 @@ enum LiveTarget {
 
 /// Resolve one title's live directory under a source root.
 ///
-/// Depth is one level below the root, stated rather than assumed: a layout
-/// nested deeper is not found here and the caller's disagreement line is what
-/// makes that visible. A directory belongs to a system by classifying the
-/// saves inside it, not by its name, so a core nobody has seen yet still works.
+/// Depth is the root itself plus one level below it, stated rather than
+/// assumed: a layout nested deeper is not found here and the caller's
+/// disagreement line is what makes that visible. A directory belongs to a
+/// system by classifying the saves inside it, not by its name, so a core
+/// nobody has seen yet still works.
 fn live_target_for(
     root: &Path,
     system_slug: &str,
@@ -1742,11 +1743,16 @@ fn live_target_for(
 ) -> LiveTarget {
     let mut copies: Vec<PathBuf> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(root) {
-        let mut directories: Vec<PathBuf> = entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.is_dir())
-            .collect();
+        // The root itself is a candidate: a save can sit directly in it with no
+        // directory at all, and leaving it out made those files invisible --
+        // not followed, not reported, never synced.
+        let mut directories: Vec<PathBuf> = vec![root.to_path_buf()];
+        directories.extend(
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir()),
+        );
         directories.sort();
         for directory in directories {
             let Ok(files) = std::fs::read_dir(&directory) else {
