@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -595,6 +595,13 @@ pub fn run_sync(
                 &save_files,
                 &rom_index,
             );
+            // How many files share each selection key. The live-directory scan
+            // only runs where it can change the answer: one copy and no
+            // declared directory has nothing to decide.
+            let mut stem_counts: HashMap<String, usize> = HashMap::new();
+            for path in &save_files {
+                *stem_counts.entry(save_selection_key(path)).or_default() += 1;
+            }
             report.scanned += save_files.len();
 
             for save_path in save_files {
@@ -608,6 +615,15 @@ pub fn run_sync(
                     continue;
                 }
                 let selection_key = save_selection_key(&save_path);
+                let needs_live_check = stem_counts.get(&selection_key).copied().unwrap_or(0) > 1
+                    || !source.save_subdirs.is_empty();
+                if needs_live_check
+                    && let Some(reason) = live_upload_blocked(&source, &save_path, &selection_key)
+                {
+                    report.skipped += 1;
+                    eprintln!("{}", reason);
+                    continue;
+                }
                 if let Some(preferred_path) = preferred_save_by_stem.get(&selection_key)
                     && preferred_path != &save_path
                 {
@@ -849,6 +865,7 @@ pub fn run_sync(
             &source.profile,
             &source.save_roots,
             &source.systems,
+            &source.save_subdirs,
             source.create_missing_system_dirs,
             &fingerprint,
             app_password,
@@ -983,6 +1000,7 @@ fn restore_cloud_only_saves(
     source_profile: &EmulatorProfile,
     save_roots: &[PathBuf],
     source_systems: &[String],
+    save_subdirs: &BTreeMap<String, PathBuf>,
     create_missing_system_dirs: bool,
     fingerprint: &str,
     app_password: Option<&str>,
@@ -1035,6 +1053,7 @@ fn restore_cloud_only_saves(
                 source_profile,
                 save_roots,
                 source_systems,
+                save_subdirs,
                 create_missing_system_dirs,
                 fingerprint,
                 app_password,
@@ -1075,6 +1094,7 @@ fn restore_single_cloud_save(
     source_profile: &EmulatorProfile,
     save_roots: &[PathBuf],
     source_systems: &[String],
+    save_subdirs: &BTreeMap<String, PathBuf>,
     create_missing_system_dirs: bool,
     fingerprint: &str,
     app_password: Option<&str>,
@@ -1139,7 +1159,7 @@ fn restore_single_cloud_save(
         .map(|value| crate::scanner::is_sidecar(&value.to_ascii_lowercase()))
         .unwrap_or(false);
     let target_extension = cloud_target_extension(cloud_save, runtime_profile);
-    let provisional_path = cloud_target_path_with_known(
+    let Some(provisional_path) = cloud_target_path_with_known(
         cloud_save,
         save_roots,
         source_kind,
@@ -1147,7 +1167,13 @@ fn restore_single_cloud_save(
         &system_slug,
         target_extension.as_deref(),
         sync_entries,
-    );
+        save_subdirs,
+    ) else {
+        // Reported by the resolver: the title sits in more than one directory
+        // and nothing says which one the emulator reads.
+        report.skipped += 1;
+        return Ok(());
+    };
 
     if existing_local_save_is_valid(&provisional_path, &system_slug, cloud_is_sidecar) {
         if verbose {
@@ -1548,10 +1574,86 @@ fn cloud_target_path(
         system_slug,
         target_extension,
         &HashMap::new(),
+        &BTreeMap::new(),
     )
+    .unwrap_or_else(|| {
+        // These tests ask about the shape of a path, not about whether the
+        // device has decided where its saves live; a fixture with the same
+        // title in two directories still has to return a path.
+        cloud_target_path_inner(
+            cloud_save,
+            save_roots,
+            source_kind,
+            source_profile,
+            system_slug,
+            target_extension,
+            &HashMap::new(),
+        )
+    })
 }
 
+/// Resolve the restore target, letting the directory the emulator actually
+/// writes decide when a copy of this title already exists.
+///
+/// `None` means the save must not be restored: two copies exist and the
+/// operator has not declared which one is live. Guessing there is exactly the
+/// defect this rule removes, and a save that waits is better than one written
+/// where the game cannot see it.
+#[allow(clippy::too_many_arguments)]
 fn cloud_target_path_with_known(
+    cloud_save: &CloudSaveSummary,
+    save_roots: &[PathBuf],
+    source_kind: &SourceKind,
+    source_profile: &EmulatorProfile,
+    system_slug: &str,
+    target_extension: Option<&str>,
+    known_saves: &HashMap<String, SyncedEntry>,
+    save_subdirs: &BTreeMap<String, PathBuf>,
+) -> Option<PathBuf> {
+    let root = select_cloud_restore_root(save_roots);
+    let filename = cloud_restore_filename(cloud_save, target_extension);
+    let selection_key = save_selection_key(Path::new(filename.trim()));
+    let declared = save_subdirs.get(system_slug).map(|path| path.as_path());
+    match live_target_for(root, system_slug, &selection_key, declared) {
+        LiveTarget::Path { live, strays } => {
+            for stray in strays {
+                eprintln!(
+                    "Stray copy {}: {} is the live directory for {}",
+                    stray.join(&filename).display(),
+                    live.display(),
+                    system_slug
+                );
+            }
+            return Some(live.join(&filename));
+        }
+        LiveTarget::Ambiguous(directories) => {
+            let named: Vec<String> = directories
+                .iter()
+                .map(|directory| directory.display().to_string())
+                .collect();
+            eprintln!(
+                "Not restoring {} ({}): it exists in {}, and no live directory is declared; set SAVE_SUBDIR_{} on this source",
+                filename,
+                system_slug,
+                named.join(", "),
+                system_slug.to_ascii_uppercase()
+            );
+            return None;
+        }
+        LiveTarget::FallThrough => {}
+    }
+    Some(cloud_target_path_inner(
+        cloud_save,
+        save_roots,
+        source_kind,
+        source_profile,
+        system_slug,
+        target_extension,
+        known_saves,
+    ))
+}
+
+fn cloud_target_path_inner(
     cloud_save: &CloudSaveSummary,
     save_roots: &[PathBuf],
     source_kind: &SourceKind,
@@ -1747,6 +1849,83 @@ fn writeback_directory_aliases(system_slug: &str) -> &'static [&'static str] {
     match system_slug {
         "game-gear" => &["genesis", "megadrive", "md"],
         _ => &[],
+    }
+}
+
+/// Which directory a system's saves actually live in.
+///
+/// A device that sorts saves by core writes them under a directory named after
+/// the core (`Mupen64Plus-Next OpenGL`) while the helper's own system
+/// directory is `n64`. Both can hold a copy of one title, and the helper
+/// cannot infer which one the emulator reads: mtime is useless because the
+/// helper's own restores refresh the stale copy, and a table of core names
+/// goes stale. So the evidence is the disk, plus one key the operator may set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LiveTarget {
+    /// No copy of this title anywhere under the root: keep the existing rules.
+    FallThrough,
+    /// The directory the emulator uses, and the other copies, which are strays.
+    Path { live: PathBuf, strays: Vec<PathBuf> },
+    /// More than one copy and nothing declared: report it and do nothing.
+    Ambiguous(Vec<PathBuf>),
+}
+
+/// Resolve one title's live directory under a source root.
+///
+/// Depth is one level below the root, stated rather than assumed: a layout
+/// nested deeper is not found here and the caller's disagreement line is what
+/// makes that visible. A directory belongs to a system by classifying the
+/// saves inside it, not by its name, so a core nobody has seen yet still works.
+fn live_target_for(
+    root: &Path,
+    system_slug: &str,
+    selection_key: &str,
+    declared: Option<&Path>,
+) -> LiveTarget {
+    let mut copies: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        let mut directories: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+        directories.sort();
+        for directory in directories {
+            let Ok(files) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            // Count per directory, not per file: one title's .eep, .sra and
+            // .srm sitting side by side are one copy, not three.
+            let holds_copy = files.flatten().any(|file| {
+                let path = file.path();
+                path.is_file()
+                    && save_selection_key(&path) == selection_key
+                    && classify_supported_save(&path, None)
+                        .map(|classification| classification.system_slug == system_slug)
+                        .unwrap_or(false)
+            });
+            if holds_copy {
+                copies.push(directory);
+            }
+        }
+    }
+
+    if let Some(subdir) = declared {
+        let live = root.join(subdir);
+        let strays: Vec<PathBuf> = copies
+            .into_iter()
+            .filter(|directory| *directory != live)
+            .collect();
+        return LiveTarget::Path { live, strays };
+    }
+
+    match copies.len() {
+        0 => LiveTarget::FallThrough,
+        1 => LiveTarget::Path {
+            live: copies.remove(0),
+            strays: Vec::new(),
+        },
+        _ => LiveTarget::Ambiguous(copies),
     }
 }
 
@@ -4603,6 +4782,55 @@ fn save_selection_key(save_path: &Path) -> String {
     stem
 }
 
+/// Whether this copy may upload, and the reason when it may not.
+///
+/// The restore rule and this one are the same rule: the directory the emulator
+/// actually writes is the one that syncs. Declared wins; two copies with
+/// nothing declared is a conflict the helper refuses to resolve, because a
+/// wrong upload replaces a good record rather than merely landing in a place
+/// the game cannot see.
+fn live_upload_blocked(
+    source: &ResolvedSource,
+    save_path: &Path,
+    selection_key: &str,
+) -> Option<String> {
+    let root = source.save_roots.first()?;
+    let classification = classify_supported_save(save_path, None)?;
+    let system_slug = classification.system_slug;
+    let declared = source
+        .save_subdirs
+        .get(&system_slug)
+        .map(|path| path.as_path());
+    match live_target_for(root, &system_slug, selection_key, declared) {
+        LiveTarget::FallThrough => None,
+        LiveTarget::Path { live, .. } => {
+            if save_path.parent() == Some(live.as_path()) {
+                return None;
+            }
+            Some(format!(
+                "Not uploading {}: it is a stray copy, and {} is the live directory for {} in source '{}'",
+                save_path.display(),
+                live.display(),
+                system_slug,
+                source.name
+            ))
+        }
+        LiveTarget::Ambiguous(directories) => {
+            let named: Vec<String> = directories
+                .iter()
+                .map(|directory| directory.display().to_string())
+                .collect();
+            Some(format!(
+                "Not uploading {}: it exists in {}, and no live directory is declared; set SAVE_SUBDIR_{} on source '{}'",
+                save_path.display(),
+                named.join(", "),
+                system_slug.to_ascii_uppercase(),
+                source.name
+            ))
+        }
+    }
+}
+
 fn select_preferred_save_per_stem(
     source_kind: &SourceKind,
     source_profile: &EmulatorProfile,
@@ -5383,6 +5611,7 @@ mod tests {
             rom_roots: vec![],
             recursive: true,
             systems: vec![],
+            save_subdirs: Default::default(),
             create_missing_system_dirs: false,
             managed: false,
             origin: origin.to_string(),

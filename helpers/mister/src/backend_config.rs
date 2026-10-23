@@ -1205,6 +1205,7 @@ mod tests {
             rom_roots: vec![PathBuf::from("/media/fat/games")],
             recursive: true,
             systems: vec!["snes".to_string(), "n64".to_string()],
+            save_subdirs: Default::default(),
             create_missing_system_dirs: false,
             managed: false,
             origin: "manual".to_string(),

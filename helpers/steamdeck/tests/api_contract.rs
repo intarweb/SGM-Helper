@@ -4485,6 +4485,387 @@ fn a_missing_rom_root_is_reported() {
     );
 }
 
+/// A save root with one title in two directories: the system directory an
+/// older helper wrote and a core-named one. `declared` is the SAVE_SUBDIR line
+/// an operator may add, or empty.
+fn live_directory_config(
+    tmp: &tempfile::TempDir,
+    server: &MockServer,
+    root: &std::path::Path,
+    state_dir: &std::path::Path,
+    declared: &str,
+) -> std::path::PathBuf {
+    let config = tmp.path().join("config-live-dir.ini");
+    fs::write(
+        &config,
+        format!(
+            "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.retroarch]\nLABEL=\"RetroArch\"\nKIND=\"retroarch\"\nPROFILE=\"retroarch\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"snes\"\n{}\n",
+            server.port(),
+            root.display(),
+            state_dir.display(),
+            root.join("saves").display(),
+            root.join("roms").display(),
+            declared
+        ),
+    )
+    .unwrap();
+    config
+}
+
+/// Eight kilobytes of non-repeating, non-text bytes: plausible for SNES and
+/// refused by nothing.
+fn snes_save_bytes(seed: u8) -> Vec<u8> {
+    (0..8192u32)
+        .map(|index| ((index as u8).wrapping_mul(37).wrapping_add(seed)) | 0x01)
+        .collect()
+}
+
+// A device that sorts saves by core writes one title into a directory named
+// after the core, while an older helper wrote the system-named one. Both copies
+// are real; only one may sync, or a wrong upload replaces the record the other
+// machine made.
+#[test]
+fn a_declared_live_directory_is_the_copy_that_uploads() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_live","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"live@example.com"}}"#);
+    });
+    let _latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        let _list = server.mock(|when, then| {
+            when.method(GET).path("/saves");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"success":true,"total":0,"limit":100,"offset":0,"saves":[]}"#);
+        });
+
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-live","sha256":"sha-live"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/snes")).unwrap();
+    fs::create_dir_all(root.join("saves/Snes9x")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let system_copy = root.join("saves/snes/Tecmo Super Bowl (USA).srm");
+    let core_copy = root.join("saves/Snes9x/Tecmo Super Bowl (USA).srm");
+    fs::write(&system_copy, snes_save_bytes(11)).unwrap();
+    fs::write(&core_copy, snes_save_bytes(29)).unwrap();
+    fs::create_dir_all(root.join("roms/snes")).unwrap();
+    fs::write(root.join("roms/snes/Tecmo Super Bowl (USA).sfc"), b"rom").unwrap();
+    let config = live_directory_config(
+        &tmp,
+        &server,
+        &root,
+        &state_dir,
+        "SAVE_SUBDIR_snes=\"Snes9x\"",
+    );
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("live@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .arg("--verbose")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        upload.calls(),
+        1,
+        "exactly one copy may upload; both or neither is the defect:\n{stderr}\n--- stdout ---\n{stdout}"
+    );
+    assert!(
+        stderr.contains("Not uploading") && stderr.contains("stray copy"),
+        "the copy outside the declared directory was not named:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains(&format!("Not uploading {}", core_copy.display())),
+        "the declared copy was skipped:\n{stderr}"
+    );
+}
+
+// Nothing declared and two copies: the helper cannot tell which one the
+// emulator reads, so neither uploads. A save that waits beats a record that is
+// overwritten.
+#[test]
+fn two_copies_with_nothing_declared_do_not_upload() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_amb","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"amb@example.com"}}"#);
+    });
+    let _latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        let _list = server.mock(|when, then| {
+            when.method(GET).path("/saves");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"success":true,"total":0,"limit":100,"offset":0,"saves":[]}"#);
+        });
+
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-amb","sha256":"sha-amb"}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/snes")).unwrap();
+    fs::create_dir_all(root.join("saves/Snes9x")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        root.join("saves/snes/Tecmo Super Bowl (USA).srm"),
+        snes_save_bytes(11),
+    )
+    .unwrap();
+    fs::write(
+        root.join("saves/Snes9x/Tecmo Super Bowl (USA).srm"),
+        snes_save_bytes(29),
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("roms/snes")).unwrap();
+    fs::write(root.join("roms/snes/Tecmo Super Bowl (USA).sfc"), b"rom").unwrap();
+    let config = live_directory_config(&tmp, &server, &root, &state_dir, "");
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("amb@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        upload.calls(),
+        0,
+        "a copy uploaded while the live directory was undecided:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("no live directory is declared"),
+        "the conflict was not reported with its remedy:\n{stderr}"
+    );
+}
+
+// Two copies and nothing declared: the restore must not pick one. It reports
+// the conflict, makes no request for the payload, and leaves both files alone.
+#[test]
+fn a_restore_with_two_copies_and_no_declaration_writes_nothing() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_rc","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"rc@example.com"}}"#);
+    });
+    let _latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":1,"limit":100,"offset":0,"saves":[{"id":"save-r","filename":"Tecmo Super Bowl (USA).srm","displayTitle":"Tecmo Super Bowl","systemSlug":"snes","sha256":"sha-r","version":3,"latestSizeBytes":8192}]}"#);
+    });
+    let download = server.mock(|when, then| {
+        when.method(GET).path("/saves/download");
+        then.status(200).body(snes_save_bytes(7));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/snes")).unwrap();
+    fs::create_dir_all(root.join("saves/Snes9x")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let system_copy = root.join("saves/snes/Tecmo Super Bowl (USA).srm");
+    let core_copy = root.join("saves/Snes9x/Tecmo Super Bowl (USA).srm");
+    fs::write(&system_copy, snes_save_bytes(11)).unwrap();
+    fs::write(&core_copy, snes_save_bytes(29)).unwrap();
+    let config = live_directory_config(&tmp, &server, &root, &state_dir, "");
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("rc@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("Not restoring") && stderr.contains("no live directory is declared"),
+        "the restore conflict was not reported:\n{stderr}"
+    );
+    assert_eq!(
+        download.calls(),
+        0,
+        "a payload was fetched for a target the helper refused to choose:\n{stderr}"
+    );
+    assert_eq!(fs::read(&system_copy).unwrap(), snes_save_bytes(11));
+    assert_eq!(fs::read(&core_copy).unwrap(), snes_save_bytes(29));
+}
+
+// Declared, with a second copy beside it: the restore lands in the declared
+// directory and the other copy is named as a stray.
+#[test]
+fn a_restore_lands_in_the_declared_directory() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_rd","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"rd@example.com"}}"#);
+    });
+    let _latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":1,"limit":100,"offset":0,"saves":[{"id":"save-rd","filename":"Tecmo Super Bowl (USA).srm","displayTitle":"Tecmo Super Bowl","systemSlug":"snes","sha256":"sha-rd","version":3,"latestSizeBytes":8192}]}"#);
+    });
+    let _download = server.mock(|when, then| {
+        when.method(GET).path("/saves/download");
+        then.status(200).body(snes_save_bytes(7));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/snes")).unwrap();
+    fs::create_dir_all(root.join("saves/Snes9x")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let system_copy = root.join("saves/snes/Tecmo Super Bowl (USA).srm");
+    let core_copy = root.join("saves/Snes9x/Tecmo Super Bowl (USA).srm");
+    fs::write(&system_copy, snes_save_bytes(11)).unwrap();
+    // Truncated, so it is present for the directory rule but not a save the
+    // helper will keep instead of restoring.
+    fs::write(&core_copy, vec![0x5Au8; 100]).unwrap();
+    let config = live_directory_config(
+        &tmp,
+        &server,
+        &root,
+        &state_dir,
+        "SAVE_SUBDIR_snes=\"Snes9x\"",
+    );
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("rd@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        fs::read(&core_copy).unwrap(),
+        snes_save_bytes(7),
+        "the restore did not land in the declared directory:\n{stderr}"
+    );
+    assert_eq!(
+        fs::read(&system_copy).unwrap(),
+        snes_save_bytes(11),
+        "the stray copy was written:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Stray copy") && stderr.contains("saves/snes"),
+        "the stray was not named:\n{stderr}"
+    );
+}
+
 fn wb_helper() -> Command {
     Command::cargo_bin("sgm-steamdeck-helper").unwrap()
 }
