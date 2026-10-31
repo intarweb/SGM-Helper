@@ -2490,37 +2490,37 @@ fn process_single_save(
     // data loss when nothing was lost. Arcade is exempt: its components are
     // named after their device and identical bytes there are a corruption
     // signal, not a rename.
-    if system_slug != "arcade"
-        && let Some((prior_path, prior_entry)) = save_already_synced_under_another_name(
+    // The same bytes already synced under another name (a rename, or a second
+    // install holding a copy) are not uploaded again: the server would read the
+    // new spelling as a second game. They still take part in the download check
+    // below, as a copy unchanged since that sync -- otherwise a newer save from
+    // another device never reaches a game that has two copies here. Arcade is
+    // exempt: its components are named after their device, and identical bytes
+    // there are the corruption signal, not a rename.
+    let duplicate_of = if system_slug != "arcade" {
+        save_already_synced_under_another_name(
             known_saves,
             save_path,
             &system_slug,
             &effective_slot_name,
             &local_sha,
         )
-    {
-        report.duplicate_ignored += 1;
-        eprintln!(
-            "Not uploading {}: it is the same save as {} under another name (sha256 {})",
-            save_path.display(),
-            prior_path,
-            local_sha
-        );
-        return Ok(Some(processed_entry(
-            state_key.clone(),
-            synced_entry(
-                local_sha,
-                prior_entry.rom_sha1.clone(),
-                prior_entry.version,
-                Some(&system_slug),
-                Some(normalized_save.local_container),
-                Some(normalized_save.adapter_profile),
-                Some(source_kind),
-                Some(source_name),
-                Some(&effective_slot_name),
-            ),
-        )));
-    }
+    } else {
+        None
+    };
+    let prior_local_sha = match &duplicate_of {
+        Some((prior_path, _)) => {
+            report.duplicate_ignored += 1;
+            eprintln!(
+                "Not uploading {}: it is the same save as {} under another name (sha256 {})",
+                save_path.display(),
+                prior_path,
+                local_sha
+            );
+            Some(local_sha.as_str())
+        }
+        None => prior_local_sha,
+    };
 
     let device_type = helper_device_type_for_upload(source_kind, &effective_profile, &system_slug);
     let mut runtime_target =
@@ -2614,6 +2614,12 @@ fn process_single_save(
         }
     }
 
+    // A copy of a save synced under another name keeps that save's game.
+    if rom_sha1.is_none()
+        && let Some((_, prior_entry)) = &duplicate_of
+    {
+        rom_sha1 = prior_entry.rom_sha1.clone();
+    }
     let Some(active_rom_sha1) = rom_sha1 else {
         report.skipped += 1;
         if verbose {
@@ -2697,6 +2703,28 @@ fn process_single_save(
         }
         Err(err) => return Err(err),
     };
+
+    // A copy of a save already synced under another name goes no further unless
+    // the server holds a different save to bring down: nothing on the server, or
+    // the same bytes there, would only upload it again as a second game.
+    if let Some((_, prior_entry)) = &duplicate_of
+        && (!latest.exists || latest.sha256.as_deref() == Some(local_sha.as_str()))
+    {
+        return Ok(Some(processed_entry(
+            state_key.clone(),
+            synced_entry(
+                local_sha,
+                prior_entry.rom_sha1.clone(),
+                prior_entry.version,
+                Some(&system_slug),
+                Some(normalized_save.local_container),
+                Some(normalized_save.adapter_profile),
+                Some(source_kind),
+                Some(source_name),
+                Some(&effective_slot_name),
+            ),
+        )));
+    }
 
     if !latest.exists {
         if options.dry_run {

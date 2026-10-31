@@ -5,6 +5,7 @@ use assert_cmd::Command;
 use httpmock::Method::{GET, POST};
 use httpmock::MockServer;
 use serde_json::Value;
+use sha2::Digest;
 use tempfile::TempDir;
 
 const PS1_MEMCARD_SIZE: usize = 131_072;
@@ -3222,6 +3223,128 @@ fn a_rename_of_a_synced_save_is_not_uploaded_again() {
         "a different game holding the same bytes was collapsed into another game's save:\n{}\n{}",
         String::from_utf8_lossy(&third.stdout),
         String::from_utf8_lossy(&third.stderr)
+    );
+}
+
+// A save with a copy under another name here (a rename, or a second emulator
+// install) is not uploaded again -- and a newer save another device put on the
+// server still reaches it. Skipping the whole sync on the duplicate left such a
+// game on its old save for good.
+#[test]
+fn a_save_with_a_copy_under_another_name_still_receives_a_newer_cloud_save() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_dup","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"dup@example.com"}}"#);
+    });
+    let _rom_lookup = server.mock(|when, then| {
+        when.method(GET).path("/rom/lookup");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"count":1,"rom":{"sha1":"madden-sha1","md5":"md5v","fileName":"madden.rom"}}"#);
+    });
+    let _conflicts = server.mock(|when, then| {
+        when.method(GET).path("/conflicts/check");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false}"#);
+    });
+    let mut latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(
+                r#"{"success":true,"save":{"id":"save-madden","sha256":"sha-madden","version":1}}"#,
+            );
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("Sega/Genesis")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let old = vec![0xC7u8; 2114];
+    let short = root.join("Sega/Genesis/Madden NFL 94.srm");
+    fs::write(&short, &old).unwrap();
+    let config = write_config(&tmp, &server, &root, &state_dir);
+    rename_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("dup@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    rename_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+
+    // The same save appears under its full name, and another device puts a newer save on the server.
+    let long = root.join("Sega/Genesis/Madden NFL '94 (USA, Europe).srm");
+    fs::write(&long, &old).unwrap();
+    let newer = vec![0x3Bu8; 2114];
+    let newer_sha = format!("{:x}", sha2::Sha256::digest(&newer));
+    latest.delete();
+    let _latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(format!(r#"{{"success":true,"exists":true,"sha256":"{newer_sha}","version":2,"id":"save-madden"}}"#));
+    });
+    let download = server.mock(|when, then| {
+        when.method(GET).path("/saves/download");
+        then.status(200)
+            .header("content-type", "application/octet-stream")
+            .body(newer.clone());
+    });
+    let out = rename_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let log = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_eq!(
+        upload.calls(),
+        1,
+        "the copy under another name was uploaded as a second game:\n{log}"
+    );
+    assert!(
+        log.contains("under another name"),
+        "the copy was not recognised as the same save:\n{log}"
+    );
+    assert!(
+        download.calls() >= 1,
+        "the newer cloud save was never fetched:\n{log}"
+    );
+    assert_eq!(
+        fs::read(&long).unwrap(),
+        newer,
+        "the copy under another name kept the old save:\n{log}"
     );
 }
 

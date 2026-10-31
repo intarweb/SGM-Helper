@@ -205,10 +205,11 @@ fn parse_lock_pid(contents: &str) -> Option<u32> {
 }
 
 /// Best-effort check of whether `pid` corresponds to a running process on
-/// this host. The windows variant has no PID-liveness primitive wired up
-/// (would require windows-sys); we conservatively return `true` and let the
-/// 6h-age fallback in classify_existing_lock recover stuck lockfiles. On
-/// Unix builds of this crate we use kill(pid, 0).
+/// this host. On Windows, `tasklist` filtered by the PID: a sync that died
+/// leaves its lock behind, and without this check only the 6h age limit
+/// freed it, so a device stopped syncing for hours. A `tasklist` that can't
+/// run counts as alive, leaving the age limit as the fallback. On Unix builds
+/// of this crate we use kill(pid, 0).
 fn pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -223,9 +224,27 @@ fn pid_alive(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
-        true
+        match std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                tasklist_lists_pid(&String::from_utf8_lossy(&out.stdout), pid)
+            }
+            _ => true,
+        }
     }
+}
+
+/// Whether `tasklist /FI "PID eq <pid>" /NH /FO CSV` output lists that PID: one
+/// CSV row per match, its second field the PID, and an informational line (in
+/// the system's language) when none matches.
+#[cfg_attr(unix, allow(dead_code))]
+fn tasklist_lists_pid(output: &str, pid: u32) -> bool {
+    let want = format!("\"{pid}\"");
+    output
+        .lines()
+        .any(|line| line.split(',').nth(1).map(str::trim) == Some(want.as_str()))
 }
 
 /// Decide whether an existing `sync.lock` at `path` (with the given on-disk
@@ -2469,37 +2488,37 @@ fn process_single_save(
     // data loss when nothing was lost. Arcade is exempt: its components are
     // named after their device and identical bytes there are a corruption
     // signal, not a rename.
-    if system_slug != "arcade"
-        && let Some((prior_path, prior_entry)) = save_already_synced_under_another_name(
+    // The same bytes already synced under another name (a rename, or a second
+    // install holding a copy) are not uploaded again: the server would read the
+    // new spelling as a second game. They still take part in the download check
+    // below, as a copy unchanged since that sync -- otherwise a newer save from
+    // another device never reaches a game that has two copies here. Arcade is
+    // exempt: its components are named after their device, and identical bytes
+    // there are the corruption signal, not a rename.
+    let duplicate_of = if system_slug != "arcade" {
+        save_already_synced_under_another_name(
             known_saves,
             save_path,
             &system_slug,
             &effective_slot_name,
             &local_sha,
         )
-    {
-        report.duplicate_ignored += 1;
-        eprintln!(
-            "Not uploading {}: it is the same save as {} under another name (sha256 {})",
-            save_path.display(),
-            prior_path,
-            local_sha
-        );
-        return Ok(Some(processed_entry(
-            state_key.clone(),
-            synced_entry(
-                local_sha,
-                prior_entry.rom_sha1.clone(),
-                prior_entry.version,
-                Some(&system_slug),
-                Some(normalized_save.local_container),
-                Some(normalized_save.adapter_profile),
-                Some(source_kind),
-                Some(source_name),
-                Some(&effective_slot_name),
-            ),
-        )));
-    }
+    } else {
+        None
+    };
+    let prior_local_sha = match &duplicate_of {
+        Some((prior_path, _)) => {
+            report.duplicate_ignored += 1;
+            eprintln!(
+                "Not uploading {}: it is the same save as {} under another name (sha256 {})",
+                save_path.display(),
+                prior_path,
+                local_sha
+            );
+            Some(local_sha.as_str())
+        }
+        None => prior_local_sha,
+    };
 
     let device_type = helper_device_type_for_upload(source_kind, &effective_profile, &system_slug);
     let mut runtime_target =
@@ -2593,6 +2612,12 @@ fn process_single_save(
         }
     }
 
+    // A copy of a save synced under another name keeps that save's game.
+    if rom_sha1.is_none()
+        && let Some((_, prior_entry)) = &duplicate_of
+    {
+        rom_sha1 = prior_entry.rom_sha1.clone();
+    }
     let Some(active_rom_sha1) = rom_sha1 else {
         report.skipped += 1;
         if verbose {
@@ -2676,6 +2701,28 @@ fn process_single_save(
         }
         Err(err) => return Err(err),
     };
+
+    // A copy of a save already synced under another name goes no further unless
+    // the server holds a different save to bring down: nothing on the server, or
+    // the same bytes there, would only upload it again as a second game.
+    if let Some((_, prior_entry)) = &duplicate_of
+        && (!latest.exists || latest.sha256.as_deref() == Some(local_sha.as_str()))
+    {
+        return Ok(Some(processed_entry(
+            state_key.clone(),
+            synced_entry(
+                local_sha,
+                prior_entry.rom_sha1.clone(),
+                prior_entry.version,
+                Some(&system_slug),
+                Some(normalized_save.local_container),
+                Some(normalized_save.adapter_profile),
+                Some(source_kind),
+                Some(source_name),
+                Some(&effective_slot_name),
+            ),
+        )));
+    }
 
     if !latest.exists {
         if options.dry_run {
@@ -4866,6 +4913,17 @@ fn synced_entry(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tasklist_output_lists_a_running_pid_only() {
+        let running = "\"sgm-windows-helper.exe\",\"16400\",\"Console\",\"1\",\"12,345 K\"\r\n";
+        assert!(super::tasklist_lists_pid(running, 16400));
+        assert!(!super::tasklist_lists_pid(running, 1640));
+        let none = "INFO: No tasks are running which match the specified criteria.\r\n";
+        assert!(!super::tasklist_lists_pid(none, 12668));
+        let localised = "INFORMATIE: er worden geen taken uitgevoerd die voldoen aan de opgegeven criteria.\r\n";
+        assert!(!super::tasklist_lists_pid(localised, 12668));
+    }
+
     use super::*;
 
     #[test]
