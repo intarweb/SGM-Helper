@@ -205,11 +205,11 @@ fn parse_lock_pid(contents: &str) -> Option<u32> {
 }
 
 /// Best-effort check of whether `pid` corresponds to a running process on
-/// this host. On Windows, `tasklist` filtered by the PID: a sync that died
-/// leaves its lock behind, and without this check only the 6h age limit
-/// freed it, so a device stopped syncing for hours. A `tasklist` that can't
-/// run counts as alive, leaving the age limit as the fallback. On Unix builds
-/// of this crate we use kill(pid, 0).
+/// this host. On Windows, OpenProcess and GetExitCodeProcess: a system call,
+/// so it can neither hang nor open a window. A sync that died leaves its lock
+/// behind, and without this check only the 6h age limit freed it, so a device
+/// stopped syncing for hours. A process that exists but can't be opened (another
+/// user's) counts as alive. On Unix builds of this crate we use kill(pid, 0).
 fn pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -222,29 +222,32 @@ fn pid_alive(pid: u32) -> bool {
         let errno = std::io::Error::last_os_error().raw_os_error();
         errno != Some(libc::ESRCH)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        match std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
-            .output()
-        {
-            Ok(out) if out.status.success() => {
-                tasklist_lists_pid(&String::from_utf8_lossy(&out.stdout), pid)
-            }
-            _ => true,
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE,
+        };
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: OpenProcess only reads the PID; the handle is closed below.
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            // SAFETY: reads this thread's last error, set by OpenProcess.
+            return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
         }
+        let mut code = 0u32;
+        // SAFETY: the handle is valid and open; code is a valid out pointer.
+        let ok = unsafe { GetExitCodeProcess(handle, &mut code) } != 0;
+        // SAFETY: closes the handle opened above, once.
+        unsafe { CloseHandle(handle) };
+        !ok || code == STILL_ACTIVE as u32
     }
-}
-
-/// Whether `tasklist /FI "PID eq <pid>" /NH /FO CSV` output lists that PID: one
-/// CSV row per match, its second field the PID, and an informational line (in
-/// the system's language) when none matches.
-#[cfg_attr(unix, allow(dead_code))]
-fn tasklist_lists_pid(output: &str, pid: u32) -> bool {
-    let want = format!("\"{pid}\"");
-    output
-        .lines()
-        .any(|line| line.split(',').nth(1).map(str::trim) == Some(want.as_str()))
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        true
+    }
 }
 
 /// Decide whether an existing `sync.lock` at `path` (with the given on-disk
@@ -4914,14 +4917,16 @@ fn synced_entry(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn tasklist_output_lists_a_running_pid_only() {
-        let running = "\"sgm-windows-helper.exe\",\"16400\",\"Console\",\"1\",\"12,345 K\"\r\n";
-        assert!(super::tasklist_lists_pid(running, 16400));
-        assert!(!super::tasklist_lists_pid(running, 1640));
-        let none = "INFO: No tasks are running which match the specified criteria.\r\n";
-        assert!(!super::tasklist_lists_pid(none, 12668));
-        let localised = "INFORMATIE: er worden geen taken uitgevoerd die voldoen aan de opgegeven criteria.\r\n";
-        assert!(!super::tasklist_lists_pid(localised, 12668));
+    fn pid_alive_tells_a_running_process_from_a_missing_one() {
+        assert!(
+            super::pid_alive(std::process::id()),
+            "this test's own process reads as dead"
+        );
+        // PIDs are multiples of 4 on Windows and below 2^22 on Linux by default, so this one names no process.
+        assert!(
+            !super::pid_alive(4_194_303),
+            "a PID naming no process reads as alive"
+        );
     }
 
     use super::*;
