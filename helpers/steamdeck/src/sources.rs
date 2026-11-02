@@ -1461,6 +1461,7 @@ mod tests {
     fn test_config(tmp: &tempfile::TempDir, root: PathBuf) -> AppConfig {
         AppConfig {
             secure: false,
+            psp_savedata_bundles: false,
             url: "127.0.0.1".to_string(),
             port: 3001,
             email: String::new(),
