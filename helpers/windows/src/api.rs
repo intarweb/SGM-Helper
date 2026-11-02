@@ -644,6 +644,7 @@ impl ApiClient {
         wii_title_id: Option<&str>,
         machine: Option<&str>,
         runtime_target: Option<&RuntimeTarget>,
+        psp_save_dir: Option<&str>,
     ) -> Result<UploadSaveResponse> {
         let url = self.url("/saves");
         let part = reqwest::blocking::multipart::Part::bytes(bytes).file_name(filename.to_string());
@@ -685,6 +686,13 @@ impl ApiClient {
         }
         if let Some(runtime_target) = runtime_target {
             form = runtime_target.apply_multipart_form(form);
+        }
+        // A PPSSPP SAVEDATA bundle names the folder it restores into; the
+        // server keeps it with the record so any device can put it back.
+        if let Some(psp_save_dir) = psp_save_dir
+            && !psp_save_dir.trim().is_empty()
+        {
+            form = form.text("pspSaveDir", psp_save_dir.trim().to_string());
         }
 
         let response = self
