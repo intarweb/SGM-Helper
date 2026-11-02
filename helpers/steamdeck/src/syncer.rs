@@ -2102,6 +2102,8 @@ fn restore_psp_savedata_bundle(target_dir: &Path, bundle: &[u8]) -> Result<usize
         let _ = fs::remove_dir_all(&staging);
         return Err(err);
     }
+    // No copy of the old folder is kept: a crash between this removal and the rename leaves the
+    // folder absent, and the next sync restores it from the server, which still holds the save.
     remove_path_if_present(target_dir)?;
     fs::rename(&staging, target_dir).with_context(|| {
         format!(
