@@ -4416,18 +4416,26 @@ fn select_preferred_save_per_stem(
         .collect()
 }
 
-/// Whether one payload is the other's bytes with `0xFF` padding on the end.
+/// Whether one payload is the other's bytes with a uniform fill on the end.
 ///
-/// A RetroArch device pads a cartridge save to whatever size its core was set up
-/// with -- a 32 KiB GBA save becomes 128 KiB, an 8 KiB Master System save
-/// becomes 64 KiB -- and fills the rest with `0xFF`. The bytes that carry the
-/// save are identical, so a size difference with padding on one side is not a
-/// conflict, and refusing it leaves the padded device unable to ever adopt the
-/// server's copy.
+/// A core pads a cartridge save to whatever size it was set up with -- a 32 KiB
+/// GBA save becomes 128 KiB, an 8 KiB Master System save becomes 64 KiB -- and
+/// fills the rest with a single byte. RetroArch uses `0xFF`; other cores use
+/// `0x00`, and a device padded one way can never adopt a copy padded the other
+/// way if only one fill is accepted.
+///
+/// The fill must be uniform: half `0x00` and half `0xFF` is a different save or
+/// a corrupt one, not padding, and treating it as padding would merge two
+/// genuinely different saves into one.
 fn same_save_with_padding(shorter: &[u8], longer: &[u8]) -> bool {
-    longer.len() >= shorter.len()
-        && longer.starts_with(shorter)
-        && longer[shorter.len()..].iter().all(|byte| *byte == 0xFF)
+    if longer.len() < shorter.len() || !longer.starts_with(shorter) {
+        return false;
+    }
+    let padding = &longer[shorter.len()..];
+    let Some(first) = padding.first() else {
+        return true;
+    };
+    matches!(*first, 0x00 | 0xFF) && padding.iter().all(|byte| *byte == *first)
 }
 
 fn preferred_save_path(
@@ -4962,12 +4970,31 @@ mod tests {
     }
 
     #[test]
-    fn padding_must_be_0xff_to_count_as_padding() {
+    fn padding_must_be_a_uniform_zero_or_ff_fill() {
         let shorter = vec![0xA5u8; 16];
-        let mut longer = shorter.clone();
-        longer.extend(vec![0x00u8; 16]);
 
-        assert!(!same_save_with_padding(&shorter, &longer));
+        let mut zero_padded = shorter.clone();
+        zero_padded.extend(vec![0x00u8; 16]);
+        assert!(
+            same_save_with_padding(&shorter, &zero_padded),
+            "a Mister-style 0x00 fill is padding, not a conflict"
+        );
+
+        let mut ff_padded = shorter.clone();
+        ff_padded.extend(vec![0xFFu8; 16]);
+        assert!(same_save_with_padding(&shorter, &ff_padded));
+
+        let mut mixed = shorter.clone();
+        mixed.extend(vec![0x00u8; 8]);
+        mixed.extend(vec![0xFFu8; 8]);
+        assert!(
+            !same_save_with_padding(&shorter, &mixed),
+            "half 0x00 and half 0xFF is a different save, not padding"
+        );
+
+        let mut garbage = shorter.clone();
+        garbage.extend(vec![0x5Au8; 16]);
+        assert!(!same_save_with_padding(&shorter, &garbage));
     }
 
     fn resolved_source(
