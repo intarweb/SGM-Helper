@@ -1874,6 +1874,24 @@ fn existing_cloud_target_for_alias(
             .copied()
             .filter(move |alias| *alias != default_dir),
     );
+    // One server slug can own two device folders: `pc-engine` covers both
+    // RetroDECK's `pcengine` and `pcenginecd`, and nothing on this path knows
+    // which one the core reads for this title. Taking the first folder that
+    // happens to hold a file is how a CD save lands where RetroArch does not
+    // look, and it is sticky -- the stray file keeps winning. Name it instead.
+    let holders: Vec<String> = candidates
+        .clone()
+        .filter(|alias| root.join(alias).join(filename).is_file())
+        .map(|alias| alias.to_string())
+        .collect();
+    if holders.len() > 1 {
+        eprintln!(
+            "More than one folder holds {} for {}: {}; using the first, which may not be the one this core reads",
+            filename,
+            system_slug,
+            holders.join(", ")
+        );
+    }
     for alias in candidates {
         let directory = root.join(alias);
         let candidate = directory.join(filename);
@@ -2970,6 +2988,21 @@ fn process_single_save(
         )));
     }
 
+    // The local file is exactly the one the server last acknowledged, and the
+    // server has moved on since. The client has no clock it can trust across
+    // devices, so it does not order the two: it keeps the local copy and says
+    // so. Saves that never reach this path -- the ones the duplicate cache
+    // skips -- are not covered; naming those would cost a request per save on
+    // every sync.
+    if prior_local_sha == Some(local_sha.as_str())
+        && latest.sha256.as_deref() != Some(local_sha.as_str())
+    {
+        eprintln!(
+            "Server holds a different copy of {} (server version {}); the local file is the one the server last saw, so the local copy is kept and the divergence is left to a human",
+            save_path.display(),
+            latest.version.unwrap_or_default()
+        );
+    }
     if latest.sha256.as_deref() == Some(local_sha.as_str()) {
         report.in_sync += 1;
         if verbose {
