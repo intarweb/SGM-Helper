@@ -2278,6 +2278,10 @@ fn generic_system_directory(system_slug: &str) -> &'static str {
         "game-gear" => "gamegear",
         "sega-cd" => "segacd",
         "sega-32x" => "sega32x",
+        // RetroDECK keeps the CD and card variants apart; the server has one
+        // slug for both, so the card folder is the default and the CD folder is
+        // picked up by the alias list when it is the one on disk.
+        "pc-engine" => "pcengine",
         "saturn" => "saturn",
         "dreamcast" => "dreamcast",
         "neogeo" => "neogeo",
@@ -2306,6 +2310,10 @@ fn system_directory_aliases(system_slug: &str) -> &'static [&'static str] {
         "game-gear" => &["gamegear", "game gear", "gg"],
         "sega-cd" => &["segacd", "sega cd", "mega cd", "megacd"],
         "sega-32x" => &["sega32x", "sega 32x", "32x"],
+        // One server slug, two RetroDECK folders: a pcenginecd game writes to
+        // `saves/pcenginecd/`, which no rule knew about, so its restore went to
+        // `saves/unknown/` and repeated forever because the file was never there.
+        "pc-engine" => &["pcengine", "pcenginecd", "pc engine", "tgfx16"],
         "saturn" => &["saturn", "sega saturn"],
         "dreamcast" => &["dreamcast", "dc"],
         "neogeo" => &["neogeo", "neo geo", "mvs", "aes"],
@@ -5071,6 +5079,29 @@ mod tests {
         longer[100] = 0x00;
 
         assert!(!same_save_with_padding(&shorter, &longer));
+    }
+
+    #[test]
+    fn a_pc_engine_save_can_land_in_either_retrodeck_folder() {
+        let aliases = system_directory_aliases("pc-engine");
+        assert!(
+            aliases.contains(&"pcenginecd"),
+            "a pcenginecd game restores into saves/pcenginecd, so that folder must be a candidate: {aliases:?}"
+        );
+        assert!(
+            aliases.contains(&"pcengine"),
+            "the card variant keeps its own folder: {aliases:?}"
+        );
+        assert_eq!(
+            generic_system_directory("pc-engine"),
+            "pcengine",
+            "pc-engine must have a real default directory, never the unknown fallback"
+        );
+        assert_ne!(
+            generic_system_directory("pc-engine"),
+            "unknown",
+            "falling through to unknown is what made the restore land where no core reads and repeat every pass"
+        );
     }
 
     #[test]
