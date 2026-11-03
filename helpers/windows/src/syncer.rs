@@ -1076,6 +1076,21 @@ fn restore_single_cloud_save(
         return Ok(());
     };
 
+    if let Some(sibling) = sibling_system_holding(
+        &provisional_path,
+        &system_slug,
+        source_kind,
+        &effective_profile,
+    ) {
+        report.skipped += 1;
+        eprintln!(
+            "Not restoring {} ({}): it would overwrite the {} save this directory already holds",
+            provisional_path.display(),
+            system_slug,
+            sibling
+        );
+        return Ok(());
+    }
     if existing_local_save_is_valid(&provisional_path, &system_slug) {
         if verbose {
             eprintln!(
@@ -1194,6 +1209,18 @@ fn restore_single_cloud_save(
         sync_entries,
     );
 
+    if let Some(sibling) =
+        sibling_system_holding(&target_path, &system_slug, source_kind, &effective_profile)
+    {
+        report.skipped += 1;
+        eprintln!(
+            "Not restoring {} ({}): it would overwrite the {} save this directory already holds",
+            target_path.display(),
+            system_slug,
+            sibling
+        );
+        return Ok(());
+    }
     if existing_local_save_is_valid(&target_path, &system_slug) {
         if verbose {
             eprintln!(
@@ -1649,6 +1676,47 @@ fn wii_title_code_from_candidate(candidate: &str) -> Option<String> {
             .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
     {
         return Some(clean);
+    }
+    None
+}
+
+/// A directory can belong to more than one system: on a MiSTer, `genesis` and
+/// `sega-32x` both live in `MegaDrive/`. When a cloud record for one of them
+/// restores, the target resolves to the file the *other* system already keeps
+/// there, and writing it would replace that system's save with this one -- each
+/// side overwriting the other on alternate passes. Presence alone cannot catch
+/// it, so name the collision and leave the file alone.
+fn sibling_system_holding(
+    path: &Path,
+    system_slug: &str,
+    source_kind: &SourceKind,
+    source_profile: &EmulatorProfile,
+) -> Option<String> {
+    let directory = path.parent()?;
+    let directory_name = directory.file_name()?.to_str()?;
+    // A directory the helper deliberately files another system's saves in is
+    // not a collision: a Game Gear save legitimately lives under `genesis/`
+    // because one core reads both, and refusing that would undo the fix that
+    // put it there.
+    if writeback_directory_aliases(system_slug).contains(&directory_name) {
+        return None;
+    }
+    // Cheap pre-filter: a sibling can only collide when this source maps it to
+    // the same directory name as the record's own system.
+    let shares_directory = crate::sources::ALL_SYNC_SYSTEMS.iter().any(|other| {
+        *other != system_slug
+            && system_directory_for_source(source_kind, source_profile, other) == directory_name
+    });
+    if !shares_directory {
+        return None;
+    }
+    let classification = classify_supported_save(path, None)?;
+    let classified = classification.system_slug;
+    if classified == system_slug {
+        return None;
+    }
+    if system_directory_for_source(source_kind, source_profile, &classified) == directory_name {
+        return Some(classified);
     }
     None
 }

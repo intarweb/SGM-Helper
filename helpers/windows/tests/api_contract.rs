@@ -5978,6 +5978,109 @@ fn writeback_config_for(
 /// A save root with one title in two directories: the system directory an
 /// older helper wrote and a core-named one. `declared` is the SAVE_SUBDIR line
 /// an operator may add, or empty.
+/// A MiSTer keeps `genesis` and `sega-32x` saves in one folder. A cloud record
+/// for one of them must not restore over the other's save: presence alone
+/// cannot see the difference, so the collision is named and the file is left
+/// alone. Before this guard the restore wrote over the sibling's save, and the
+/// sibling's next pass wrote back -- each sync silently replacing the other.
+#[test]
+fn a_restore_does_not_overwrite_a_sibling_systems_save_in_a_shared_folder() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_sib","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"sib@example.com"}}"#);
+    });
+    let _latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":1,"limit":100,"offset":0,"saves":[{"id":"save-32x","filename":"NBA Jam - Tournament Edition (World).sav","displayTitle":"NBA Jam - Tournament Edition","systemSlug":"sega-32x","sha256":"sha-32x","version":2,"latestSizeBytes":8192}]}"#);
+    });
+    let _download = server.mock(|when, then| {
+        when.method(GET).path("/saves/download");
+        then.status(200).body(snes_save_bytes(3));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/MegaDrive")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let genesis_copy = root.join("saves/MegaDrive/NBA Jam - Tournament Edition (World).sav");
+    // The Genesis save that is already in the folder the 32X record targets.
+    let genesis_bytes = snes_save_bytes(21);
+    fs::write(&genesis_copy, &genesis_bytes).unwrap();
+
+    // A MiSTer source: `genesis` and `sega-32x` both resolve to `MegaDrive/`.
+    let config = mister_shared_folder_config(&tmp, &server, &root, &state_dir);
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("sib@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        fs::read(&genesis_copy).unwrap(),
+        genesis_bytes,
+        "the 32X restore overwrote the Genesis save in the shared folder:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("would overwrite the genesis save"),
+        "the collision was not named:\n{stderr}"
+    );
+}
+
+/// A MiSTer source whose SYSTEMS list carries both of the systems that share
+/// the `MegaDrive/` folder, with the 32X record's live directory declared.
+fn mister_shared_folder_config(
+    tmp: &tempfile::TempDir,
+    server: &MockServer,
+    root: &std::path::Path,
+    state_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    let config = tmp.path().join("config-mister-shared.ini");
+    fs::write(
+        &config,
+        format!(
+            "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.mister]\nLABEL=\"MiSTer\"\nKIND=\"mister-fpga\"\nPROFILE=\"mister\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"genesis,sega-32x\"\nSAVE_SUBDIR_sega-32x=\"MegaDrive\"\n",
+            server.port(),
+            root.display(),
+            state_dir.display(),
+            root.join("saves").display(),
+            root.join("roms").display(),
+        ),
+    )
+    .unwrap();
+    config
+}
+
 fn live_directory_config(
     tmp: &tempfile::TempDir,
     server: &MockServer,
@@ -5985,16 +6088,28 @@ fn live_directory_config(
     state_dir: &std::path::Path,
     declared: &str,
 ) -> std::path::PathBuf {
+    live_directory_config_systems(tmp, server, root, state_dir, "snes", declared)
+}
+
+fn live_directory_config_systems(
+    tmp: &tempfile::TempDir,
+    server: &MockServer,
+    root: &std::path::Path,
+    state_dir: &std::path::Path,
+    systems: &str,
+    declared: &str,
+) -> std::path::PathBuf {
     let config = tmp.path().join("config-live-dir.ini");
     fs::write(
         &config,
         format!(
-            "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.retroarch]\nLABEL=\"RetroArch\"\nKIND=\"retroarch\"\nPROFILE=\"retroarch\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"snes\"\n{}\n",
+            "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.retroarch]\nLABEL=\"RetroArch\"\nKIND=\"retroarch\"\nPROFILE=\"retroarch\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"{}\"\n{}\n",
             server.port(),
             root.display(),
             state_dir.display(),
             root.join("saves").display(),
             root.join("roms").display(),
+            systems,
             declared
         ),
     )

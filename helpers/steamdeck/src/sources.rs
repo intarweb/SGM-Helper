@@ -27,7 +27,7 @@ pub enum SourceKind {
     SteamDeck,
 }
 
-const ALL_SYNC_SYSTEMS: &[&str] = &[
+pub(crate) const ALL_SYNC_SYSTEMS: &[&str] = &[
     "nes",
     "snes",
     "gameboy",
