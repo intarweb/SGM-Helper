@@ -5975,9 +5975,6 @@ fn writeback_config_for(
     config
 }
 
-/// A save root with one title in two directories: the system directory an
-/// older helper wrote and a core-named one. `declared` is the SAVE_SUBDIR line
-/// an operator may add, or empty.
 /// A MiSTer keeps `genesis` and `sega-32x` saves in one folder. A cloud record
 /// for one of them must not restore over the other's save: presence alone
 /// cannot see the difference, so the collision is named and the file is left
@@ -6081,6 +6078,9 @@ fn mister_shared_folder_config(
     config
 }
 
+/// A save root with one title in two directories: the system directory an
+/// older helper wrote and a core-named one. `declared` is the SAVE_SUBDIR line
+/// an operator may add, or empty.
 fn live_directory_config(
     tmp: &tempfile::TempDir,
     server: &MockServer,
