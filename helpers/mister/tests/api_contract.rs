@@ -5837,10 +5837,16 @@ fn a_save_the_server_already_holds_says_so_every_run() {
     let bytes = vec![0xA5u8; 2114];
     fs::write(&path, &bytes).unwrap();
     let sha = format!("{:x}", Sha256::digest(&bytes));
+    // A current marker: this release recorded it just now. A bare hash from an
+    // older build is deliberately treated as stale and would be re-uploaded.
     let state = format!(
-        r#"{{"entries":{{}},"terminal_rejections":{{}},"duplicate_uploads":{{"{}":"{}"}}}}"#,
+        r#"{{"entries":{{}},"terminal_rejections":{{}},"duplicate_uploads":{{"{}":{{"sha256":"{}","helper_version":"{}","recorded_at":"{}"}}}}}}"#,
         path.display(),
-        sha
+        sha,
+        sgm_mister_helper::state::build_identity(),
+        time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default()
     );
     fs::write(state_dir.join("sync_state.json"), state).unwrap();
     let config = writeback_config_for(&tmp, &server, &root, &state_dir, "genesis");

@@ -53,7 +53,7 @@ pub struct SyncState {
     /// reports that file as settled instead of uploading it again; a changed
     /// payload no longer matches and is uploaded.
     #[serde(default)]
-    pub duplicate_uploads: HashMap<String, String>,
+    pub duplicate_uploads: HashMap<String, DuplicateUpload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +97,86 @@ pub fn terminal_rejection_is_current(prior: &TerminalRejection) -> bool {
     };
     OffsetDateTime::now_utc() - recorded_at
         <= time::Duration::days(TERMINAL_REJECTION_LIFETIME_DAYS)
+}
+
+/// A save the server once answered as a duplicate it declined to store.
+///
+/// The marker is a remembered decision, not a fact: the server's copy can move
+/// on, and a marker with no expiry keeps a device skipping forever. It carries
+/// the release that recorded it and the date, so it is re-probed exactly the
+/// way a terminal refusal is.
+#[derive(Debug, Clone, Serialize)]
+pub struct DuplicateUpload {
+    pub sha256: String,
+    /// The helper release that recorded the skip. A marker from another
+    /// release is probed again: the fix that lets an upload through usually
+    /// ships in the helper or the server it talks to.
+    #[serde(default)]
+    pub helper_version: Option<String>,
+    #[serde(default)]
+    pub recorded_at: Option<String>,
+}
+
+/// How long a duplicate marker is trusted. Past this the save is offered to
+/// the server again: the answer is a statement about the server at one
+/// moment, and the fleet's own history has a fixed server looking settled.
+pub const DUPLICATE_UPLOAD_LIFETIME_DAYS: i64 = 14;
+
+/// Every marker written before this release is a bare hash string. Reading one
+/// must yield a stale marker, never a deserialise error: a typed failure here
+/// takes the whole state file with it, which is how a schema change loses a
+/// device's auth and sync history.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DuplicateUploadRepr {
+    Legacy(String),
+    Current {
+        sha256: String,
+        #[serde(default)]
+        helper_version: Option<String>,
+        #[serde(default)]
+        recorded_at: Option<String>,
+    },
+}
+
+impl<'de> Deserialize<'de> for DuplicateUpload {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match DuplicateUploadRepr::deserialize(deserializer)? {
+            DuplicateUploadRepr::Legacy(sha256) => DuplicateUpload {
+                sha256,
+                helper_version: None,
+                recorded_at: None,
+            },
+            DuplicateUploadRepr::Current {
+                sha256,
+                helper_version,
+                recorded_at,
+            } => DuplicateUpload {
+                sha256,
+                helper_version,
+                recorded_at,
+            },
+        })
+    }
+}
+
+impl DuplicateUpload {
+    pub fn is_current(&self) -> bool {
+        if self.helper_version.as_deref() != Some(build_identity()) {
+            return false;
+        }
+        let Some(recorded_at) = self.recorded_at.as_deref() else {
+            return false;
+        };
+        let Ok(recorded_at) = OffsetDateTime::parse(recorded_at, &Rfc3339) else {
+            return false;
+        };
+        OffsetDateTime::now_utc() - recorded_at
+            <= time::Duration::days(DUPLICATE_UPLOAD_LIFETIME_DAYS)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -578,5 +658,46 @@ mod tests {
         assert!(entry.system_slug.is_none());
         assert!(entry.local_container.is_none());
         assert!(entry.adapter_profile.is_none());
+    }
+    #[test]
+    fn a_duplicate_marker_only_holds_for_this_release_and_not_forever() {
+        let now = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_default();
+        let fresh = DuplicateUpload {
+            sha256: "abc".into(),
+            helper_version: Some(build_identity().to_string()),
+            recorded_at: Some(now),
+        };
+        assert!(fresh.is_current(), "a marker from this release should hold");
+
+        let other_release = DuplicateUpload {
+            helper_version: Some("some-other-build".into()),
+            ..fresh.clone()
+        };
+        assert!(
+            !other_release.is_current(),
+            "a marker written by another release must be re-probed"
+        );
+
+        let ancient = DuplicateUpload {
+            recorded_at: Some("2020-01-01T00:00:00Z".into()),
+            ..fresh.clone()
+        };
+        assert!(
+            !ancient.is_current(),
+            "a marker past its lifetime must be re-probed"
+        );
+
+        // Everything fork.54 and earlier wrote is a bare hash with no fields.
+        let legacy = DuplicateUpload {
+            helper_version: None,
+            recorded_at: None,
+            ..fresh.clone()
+        };
+        assert!(
+            !legacy.is_current(),
+            "a marker that cannot be dated is stale, which is how old ones clear"
+        );
     }
 }

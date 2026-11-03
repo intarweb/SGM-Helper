@@ -614,14 +614,18 @@ pub fn run_sync(
                 }
             }
 
-            if let Some(prior_sha) = sync_state.duplicate_uploads.get(&save_key).cloned() {
-                if sha256_file(&save_path)
-                    .map(|current| current == prior_sha)
-                    .unwrap_or(false)
+            if let Some(prior) = sync_state.duplicate_uploads.get(&save_key).cloned() {
+                if prior.is_current()
+                    && sha256_file(&save_path)
+                        .map(|current| current == prior.sha256)
+                        .unwrap_or(false)
                 {
                     // The server kept its own copy of exactly these bytes and
-                    // answers the same way every pass. Asking again only
-                    // churns both logs; a changed payload is uploaded.
+                    // answered so within this release's lifetime. A marker from
+                    // another release, or one that has aged out, is offered
+                    // again: the same rule terminal refusals already follow,
+                    // because a remembered answer is not the server's current
+                    // one and asking again costs a single request.
                     report.duplicate_ignored += 1;
                     // Named every run, not only under --verbose: this skip persists until
                     // the file changes, and a save that is never uploaded, never rejected
@@ -803,7 +807,18 @@ pub fn run_sync(
 
     if !report.duplicate_pending.is_empty() {
         for (path, sha) in report.duplicate_pending.drain(..) {
-            sync_state.duplicate_uploads.insert(path, sha);
+            sync_state.duplicate_uploads.insert(
+                path,
+                crate::state::DuplicateUpload {
+                    sha256: sha,
+                    helper_version: Some(crate::state::build_identity().to_string()),
+                    recorded_at: Some(
+                        time::OffsetDateTime::now_utc()
+                            .format(&time::format_description::well_known::Rfc3339)
+                            .unwrap_or_default(),
+                    ),
+                },
+            );
         }
     }
     if !options.dry_run {

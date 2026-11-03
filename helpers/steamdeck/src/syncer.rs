@@ -513,10 +513,11 @@ pub fn run_sync(
 
             for port_save in port_saves {
                 let save_key = port_save.path.to_string_lossy().to_string();
-                if let Some(prior_sha) = sync_state.duplicate_uploads.get(&save_key).cloned() {
-                    if sha256_file(&port_save.path)
-                        .map(|current| current == prior_sha)
-                        .unwrap_or(false)
+                if let Some(prior) = sync_state.duplicate_uploads.get(&save_key).cloned() {
+                    if prior.is_current()
+                        && sha256_file(&port_save.path)
+                            .map(|current| current == prior.sha256)
+                            .unwrap_or(false)
                     {
                         // The server kept its own copy of exactly these bytes and
                         // answers the same way every pass. Asking again only
@@ -687,10 +688,11 @@ pub fn run_sync(
                     }
                 }
 
-                if let Some(prior_sha) = sync_state.duplicate_uploads.get(&save_key).cloned() {
-                    if sha256_file(&save_path)
-                        .map(|current| current == prior_sha)
-                        .unwrap_or(false)
+                if let Some(prior) = sync_state.duplicate_uploads.get(&save_key).cloned() {
+                    if prior.is_current()
+                        && sha256_file(&save_path)
+                            .map(|current| current == prior.sha256)
+                            .unwrap_or(false)
                     {
                         // The server kept its own copy of exactly these bytes and
                         // answers the same way every pass. Asking again only
@@ -878,7 +880,18 @@ pub fn run_sync(
 
     if !report.duplicate_pending.is_empty() {
         for (path, sha) in report.duplicate_pending.drain(..) {
-            sync_state.duplicate_uploads.insert(path, sha);
+            sync_state.duplicate_uploads.insert(
+                path,
+                crate::state::DuplicateUpload {
+                    sha256: sha,
+                    helper_version: Some(crate::state::build_identity().to_string()),
+                    recorded_at: Some(
+                        time::OffsetDateTime::now_utc()
+                            .format(&time::format_description::well_known::Rfc3339)
+                            .unwrap_or_default(),
+                    ),
+                },
+            );
         }
     }
     if !options.dry_run {
