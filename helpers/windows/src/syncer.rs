@@ -784,6 +784,7 @@ pub fn run_sync(
             app_password,
             options,
             &mut sync_state.entries,
+            &rom_index,
             &mut report,
             verbose,
         )?;
@@ -930,6 +931,7 @@ fn restore_cloud_only_saves(
     app_password: Option<&str>,
     options: &SyncOptions,
     sync_entries: &mut HashMap<String, SyncedEntry>,
+    rom_index: &HashMap<String, RomIndexEntry>,
     report: &mut SyncReport,
     verbose: bool,
 ) -> Result<()> {
@@ -984,6 +986,7 @@ fn restore_cloud_only_saves(
                 options,
                 sync_entries,
                 &mut restored_targets,
+                rom_index,
                 report,
                 verbose,
             ) {
@@ -1025,6 +1028,7 @@ fn restore_single_cloud_save(
     options: &SyncOptions,
     sync_entries: &mut HashMap<String, SyncedEntry>,
     restored_targets: &mut HashSet<String>,
+    rom_index: &HashMap<String, RomIndexEntry>,
     report: &mut SyncReport,
     verbose: bool,
 ) -> Result<()> {
@@ -1084,6 +1088,7 @@ fn restore_single_cloud_save(
         target_extension.as_deref(),
         sync_entries,
         save_subdirs,
+        rom_index,
     ) else {
         // Reported by the resolver: the title sits in more than one directory
         // and nothing says which one the emulator reads.
@@ -1355,6 +1360,8 @@ fn supports_cloud_restore_system(system_slug: &str) -> bool {
             | "dreamcast"
             | "neogeo"
             | "wii"
+            | "pc-engine"
+            | "tgfx16"
             | "psx"
             | "ps2"
             | "psp"
@@ -1487,6 +1494,7 @@ fn cloud_target_path(
         target_extension,
         &HashMap::new(),
         &BTreeMap::new(),
+        &HashMap::new(),
     )
     .unwrap_or_else(|| {
         // These tests ask about the shape of a path, not about whether the
@@ -1499,6 +1507,7 @@ fn cloud_target_path(
             source_profile,
             system_slug,
             target_extension,
+            &HashMap::new(),
             &HashMap::new(),
         )
     })
@@ -1521,6 +1530,7 @@ fn cloud_target_path_with_known(
     target_extension: Option<&str>,
     known_saves: &HashMap<String, SyncedEntry>,
     save_subdirs: &BTreeMap<String, PathBuf>,
+    rom_index: &HashMap<String, RomIndexEntry>,
 ) -> Option<PathBuf> {
     let root = select_cloud_restore_root(save_roots);
     let filename = cloud_restore_filename(cloud_save, target_extension);
@@ -1562,9 +1572,11 @@ fn cloud_target_path_with_known(
         system_slug,
         target_extension,
         known_saves,
+        rom_index,
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cloud_target_path_inner(
     cloud_save: &CloudSaveSummary,
     save_roots: &[PathBuf],
@@ -1573,8 +1585,10 @@ fn cloud_target_path_inner(
     system_slug: &str,
     target_extension: Option<&str>,
     known_saves: &HashMap<String, SyncedEntry>,
+    rom_index: &HashMap<String, RomIndexEntry>,
 ) -> PathBuf {
     let root = select_cloud_restore_root(save_roots);
+    let filename = cloud_restore_filename(cloud_save, target_extension);
     if system_slug == "wii"
         && let Some(title_code) = cloud_wii_title_code(cloud_save)
     {
@@ -1586,12 +1600,13 @@ fn cloud_target_path_inner(
                 source_kind,
                 source_profile,
                 system_slug,
+                rom_index,
+                &filename,
             ))
             .join(title_code)
         };
         return target_dir.join("data.bin");
     }
-    let filename = cloud_restore_filename(cloud_save, target_extension);
     let target_dir = if root_is_system_specific(root, source_profile, system_slug) {
         root.to_path_buf()
     } else {
@@ -1610,6 +1625,8 @@ fn cloud_target_path_inner(
             source_kind,
             source_profile,
             system_slug,
+            rom_index,
+            &filename,
         ))
     };
     target_dir.join(filename)
@@ -2126,12 +2143,54 @@ fn same_save_stem(candidate: &str, reference: &str) -> bool {
     Path::new(candidate).extension().is_some() && save_stem(candidate) == save_stem(reference)
 }
 
+/// The ROM's own directory, when the index knows this title.
+///
+/// A save's directory cannot say whether a PC Engine title is a card or a CD
+/// release: RetroDECK gives them `pcengine/` and `pcenginecd/`, the server has
+/// one `pc-engine` slug for both, and the alias fallback can only ever pick
+/// one. The ROM's folder is the only evidence that distinguishes them, so it
+/// is consulted for the *raw* directory name -- the canonical token collapses
+/// both to `pc-engine`, which would answer nothing.
+fn rom_directory_hint(
+    rom_index: &HashMap<String, RomIndexEntry>,
+    filename: &str,
+) -> Option<String> {
+    let stem = save_stem(filename).to_ascii_lowercase();
+    let entry = rom_index.get(&stem)?;
+    if entry.ambiguous {
+        return None;
+    }
+    entry
+        .path
+        .parent()
+        .and_then(|dir| dir.file_name())
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+}
+
 fn preferred_system_directory_for_root(
     root: &Path,
     source_kind: &SourceKind,
     source_profile: &EmulatorProfile,
     system_slug: &str,
+    rom_index: &HashMap<String, RomIndexEntry>,
+    filename: &str,
 ) -> String {
+    let default_dir = system_directory_for_source(source_kind, source_profile, system_slug);
+    // The ROM's folder outranks the alias order: when it names one of this
+    // system's candidate directories and that directory is on disk, that is the
+    // folder the core reads this title from. Without it a CD title lands in the
+    // card folder and stays there, because the stray file keeps winning.
+    let rom_hint = rom_directory_hint(rom_index, filename);
+    if let Some(hint) = rom_hint.as_deref() {
+        let token = normalize_path_token(hint);
+        let is_candidate = std::iter::once(default_dir)
+            .chain(system_directory_aliases(system_slug).iter().copied())
+            .any(|alias| normalize_path_token(alias) == token);
+        if is_candidate && root.join(hint).is_dir() {
+            return hint.to_string();
+        }
+    }
     let default_dir = system_directory_for_source(source_kind, source_profile, system_slug);
     if root.join(default_dir).is_dir() {
         return default_dir.to_string();

@@ -4564,6 +4564,105 @@ fn a_restore_does_not_overwrite_a_sibling_systems_save_in_a_shared_folder() {
     );
 }
 
+/// A PC Engine CD title must not restore into the card folder.
+///
+/// RetroDECK gives the card and CD variants their own folders; the server has
+/// one `pc-engine` slug for both, and the alias list can only return the first
+/// match. The ROM's own directory is the only evidence that tells them apart --
+/// with both folders on disk the restore has to land in the one the core reads,
+/// which is the ROM's.
+#[test]
+fn a_pc_engine_cd_title_restores_into_the_folder_its_rom_lives_in() {
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_pce","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"pce@example.com"}}"#);
+    });
+    let _latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"exists":false,"sha256":null,"version":null,"id":null}"#);
+    });
+    let _list = server.mock(|when, then| {
+        when.method(GET).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"total":1,"limit":100,"offset":0,"saves":[{"id":"save-pce","filename":"Dungeon Explorer II (USA).srm","displayTitle":"Dungeon Explorer II","systemSlug":"pc-engine","sha256":"sha-pce","version":1,"latestSizeBytes":2048}]}"#);
+    });
+    let _download = server.mock(|when, then| {
+        when.method(GET).path("/saves/download");
+        then.status(200).body(snes_save_bytes(4));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    // BOTH folders exist: the card folder first, as it would be on a device
+    // that ran the version which restored everything into it.
+    fs::create_dir_all(root.join("saves/pcengine")).unwrap();
+    fs::create_dir_all(root.join("saves/pcenginecd")).unwrap();
+    // The ROM says which one this title is.
+    fs::create_dir_all(root.join("roms/pcenginecd")).unwrap();
+    fs::write(
+        root.join("roms/pcenginecd/Dungeon Explorer II (USA).cue"),
+        b"rom",
+    )
+    .unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+
+    let config = tmp.path().join("config-pce.ini");
+    fs::write(
+        &config,
+        format!(
+            "URL=\"127.0.0.1\"\nPORT=\"{}\"\nROOT=\"{}\"\nSTATE_DIR=\"{}\"\nWATCH=\"false\"\nWATCH_INTERVAL=\"1\"\n\n[source.retroarch]\nLABEL=\"RetroArch\"\nKIND=\"retroarch\"\nPROFILE=\"retroarch\"\nSAVE_PATH=\"{}\"\nROM_PATH=\"{}\"\nRECURSIVE=\"true\"\nSYSTEMS=\"pc-engine\"\n",
+            server.port(),
+            root.display(),
+            state_dir.display(),
+            root.join("saves").display(),
+            root.join("roms").display(),
+        ),
+    )
+    .unwrap();
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("pce@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let cd_copy = root.join("saves/pcenginecd/Dungeon Explorer II (USA).srm");
+    let card_copy = root.join("saves/pcengine/Dungeon Explorer II (USA).srm");
+    assert!(
+        cd_copy.is_file(),
+        "the restore did not land in the folder the ROM lives in:\n{stderr}"
+    );
+    assert!(
+        !card_copy.exists(),
+        "the restore landed in the card folder the core does not read:\n{stderr}"
+    );
+}
+
 fn mister_shared_folder_config(
     tmp: &tempfile::TempDir,
     server: &MockServer,
