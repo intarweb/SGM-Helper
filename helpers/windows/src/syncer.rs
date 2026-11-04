@@ -128,12 +128,20 @@ fn report_stored_sha(save_path: &Path, sent_sha: &str, stored_sha: Option<&str>)
     }
 }
 
+/// The key a declined upload is remembered under. The card is part of it: the
+/// same bytes offered under another card is a different offer, and the server
+/// moves the save onto the line that card names.
+fn duplicate_upload_key(path: &std::path::Path, slot: &str) -> String {
+    format!("{}|{}", path.display(), slot.trim().to_ascii_lowercase())
+}
+
 fn settle_upload(
     report: &mut SyncReport,
     path: &std::path::Path,
     bytes: usize,
     record_id: Option<&str>,
     duplicate: bool,
+    slot: &str,
 ) {
     eprintln!(
         "Uploaded {} (record {}, {} bytes)",
@@ -151,7 +159,7 @@ fn settle_upload(
         if !file_sha.is_empty() {
             report
                 .duplicate_pending
-                .push((path.to_string_lossy().to_string(), file_sha));
+                .push((duplicate_upload_key(path, slot), file_sha));
         }
         return;
     }
@@ -692,25 +700,54 @@ pub fn run_sync(
                 }
             }
 
-            if let Some(prior_sha) = sync_state.duplicate_uploads.get(&save_key).cloned() {
-                if sha256_file(&save_path)
-                    .map(|current| current == prior_sha)
-                    .unwrap_or(false)
+            // The offer is (path, bytes, card). The same bytes offered under a
+            // different card is a different offer: the server moves the save
+            // onto the line that card names, and a helper that remembers only
+            // the bytes refuses it forever, leaving the save served by the
+            // card it came from.
+            let known_entry = sync_state.entries.get(&save_key).cloned();
+            let offered_slot = known_entry
+                .as_ref()
+                .map(|entry| {
+                    resolve_slot_name_for_sync(
+                        entry.system_slug.as_deref().unwrap_or(""),
+                        &save_path,
+                        &options.slot_name,
+                    )
+                })
+                .unwrap_or_else(|| resolve_slot_name_for_sync("", &save_path, &options.slot_name));
+            let remembered_slot = known_entry
+                .as_ref()
+                .and_then(|entry| entry.slot_name.clone())
+                .unwrap_or_else(|| offered_slot.clone());
+            let moved_to_another_card = !remembered_slot
+                .trim()
+                .eq_ignore_ascii_case(offered_slot.trim());
+
+            let duplicate_key = duplicate_upload_key(&save_path, &remembered_slot);
+            if let Some(prior_sha) = sync_state.duplicate_uploads.get(&duplicate_key).cloned() {
+                if !moved_to_another_card
+                    && sha256_file(&save_path)
+                        .map(|current| current == prior_sha)
+                        .unwrap_or(false)
                 {
                     // The server kept its own copy of exactly these bytes and
                     // answers the same way every pass. Asking again only
-                    // churns both logs; a changed payload is uploaded.
+                    // churns both logs; a changed payload or a different card
+                    // is uploaded.
                     report.duplicate_ignored += 1;
-                    // Named every run, not only under --verbose: this skip persists until
-                    // the file changes, and a save that is never uploaded, never rejected
-                    // and never mentioned reads as one the helper does not see.
+                    // Named every run, not only under --verbose: this skip
+                    // persists until the file or the card changes, and a save
+                    // that is never uploaded, never rejected and never
+                    // mentioned reads as one the helper does not see.
                     eprintln!(
-                        "Not uploading {}: the server already holds these bytes",
-                        save_path.display()
+                        "Not uploading {}: the server already holds these bytes on {}",
+                        save_path.display(),
+                        remembered_slot
                     );
                     continue;
                 }
-                sync_state.duplicate_uploads.remove(&save_key);
+                sync_state.duplicate_uploads.remove(&duplicate_key);
             }
 
             let decisions_before = report.decisions();
@@ -2815,7 +2852,14 @@ fn process_psp_savedata_dir(
         };
         report_stored_sha(dir, &local_sha, save.sha256.as_deref());
         let duplicate = response.declined_duplicate();
-        settle_upload(report, dir, bytes.len(), save.id.as_deref(), duplicate);
+        settle_upload(
+            report,
+            dir,
+            bytes.len(),
+            save.id.as_deref(),
+            duplicate,
+            slot_name,
+        );
         if duplicate {
             // settle_upload hashes a file; a folder is remembered by its bundle's hash.
             report
@@ -3440,6 +3484,7 @@ fn process_single_save(
             normalized_save.canonical_bytes.len(),
             upload_id.as_deref(),
             duplicate_uploaded,
+            &effective_slot_name,
         );
         return Ok(Some(processed_entry(
             state_key.clone(),
@@ -3539,6 +3584,7 @@ fn process_single_save(
             normalized_save.canonical_bytes.len(),
             upload_id.as_deref(),
             duplicate_uploaded,
+            &effective_slot_name,
         );
         return Ok(Some(processed_entry(
             state_key.clone(),
@@ -3556,7 +3602,22 @@ fn process_single_save(
         )));
     }
 
-    if latest.sha256.as_deref() == Some(local_sha.as_str()) {
+    // The server holding these bytes means the save is in sync only if this
+    // device last synced it under the card it is being offered under now. A
+    // save that moved cards -- a per-game card newly holding it, or a card
+    // renamed -- is a different offer of the same bytes, and the server needs
+    // it to move the save onto the line that card names. Comparing bytes
+    // alone leaves the save served by the card it came from.
+    let offered_slot = effective_slot_name.trim();
+    let known_slot = known_saves
+        .get(save_key)
+        .and_then(|entry| entry.slot_name.as_deref())
+        .map(str::trim)
+        .filter(|slot| !slot.is_empty());
+    let moved_to_another_card = known_slot
+        .map(|slot| !slot.eq_ignore_ascii_case(offered_slot))
+        .unwrap_or(false);
+    if latest.sha256.as_deref() == Some(local_sha.as_str()) && !moved_to_another_card {
         report.in_sync += 1;
         if verbose {
             eprintln!(
@@ -3644,6 +3705,7 @@ fn process_single_save(
                 normalized_save.canonical_bytes.len(),
                 None,
                 response.declined_duplicate(),
+                &effective_slot_name,
             );
             return Ok(Some(processed_entry(
                 state_key.clone(),
@@ -3717,6 +3779,7 @@ fn process_single_save(
                     normalized_save.canonical_bytes.len(),
                     None,
                     response.declined_duplicate(),
+                    &effective_slot_name,
                 );
                 return Ok(Some(processed_entry(
                     state_key.clone(),
@@ -3809,6 +3872,7 @@ fn process_single_save(
             normalized_save.canonical_bytes.len(),
             None,
             response.declined_duplicate(),
+            &effective_slot_name,
         );
         return Ok(Some(processed_entry(
             state_key.clone(),
@@ -3899,6 +3963,7 @@ fn process_single_save(
                     normalized_save.canonical_bytes.len(),
                     None,
                     response.declined_duplicate(),
+                    &effective_slot_name,
                 );
                 return Ok(Some(processed_entry(
                     state_key.clone(),

@@ -6009,7 +6009,7 @@ fn a_save_the_server_already_holds_says_so_every_run() {
     fs::write(&path, &bytes).unwrap();
     let sha = format!("{:x}", Sha256::digest(&bytes));
     let state = format!(
-        r#"{{"entries":{{}},"terminal_rejections":{{}},"duplicate_uploads":{{"{}":"{}"}}}}"#,
+        r#"{{"entries":{{}},"terminal_rejections":{{}},"duplicate_uploads":{{"{}|default":"{}"}}}}"#,
         path.display(),
         sha
     );
@@ -6929,5 +6929,116 @@ fn a_per_game_ps1_card_restores_into_the_games_card() {
     assert!(
         restored.as_deref() == Some(card.as_slice()),
         "the per-game card did not restore to Tekken 3 (USA).srm; psx holds {listing:?}:\n{stderr}"
+    );
+}
+
+// The state a device carries when it last synced a save under one card and the
+// file now sits on another.
+fn slot_state(state_dir: &std::path::Path, path: &std::path::Path, system_slug: &str, slot: &str) {
+    let state = format!(
+        r#"{{"entries": {{"{}": {{"sha256": "701641b95e5e7394", "rom_sha1": "rom-sha", "version": 3, "system_slug": "{}", "local_container": "native", "adapter_profile": "identity", "source_kind": "retroarch", "source_name": "RetroArch", "slot_name": "{}", "updated_at": "2026-01-01T00:00:00Z"}}}}}}"#,
+        path.display(),
+        system_slug,
+        slot
+    );
+    fs::write(state_dir.join("sync_state.json"), state).unwrap();
+}
+
+// A save that moves to another card is a different offer of the same bytes.
+// The server moves the logical save onto the line the new card names, so a
+// helper that treats "the server already has these bytes" as in-sync leaves
+// the save served by the card it came from — on the Deck, and on the MiSTer,
+// forever, because neither side ever re-sends it.
+#[test]
+fn a_save_offered_under_a_new_card_is_uploaded_even_when_the_bytes_match() {
+    // A blank formatted PS1 card: frame 0 carries the "MC" magic and frames
+    // 0-15 each end in their XOR checksum, which is the evidence the scanner
+    // requires before it reads a .srm as a card at all.
+    let mut bytes = vec![0x00u8; 131072];
+    bytes[..2].copy_from_slice(b"MC");
+    for frame in 0..16usize {
+        let start = frame * 128;
+        let checksum = bytes[start..start + 127]
+            .iter()
+            .fold(0u8, |acc, value| acc ^ value);
+        bytes[start + 127] = checksum;
+    }
+    let sha = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        format!("{:x}", hasher.finalize())
+    };
+
+    let server = MockServer::start();
+    let _token = server.mock(|when, then| {
+        when.method(POST).path("/auth/token/app-password");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"token":"tok_slot","expiresInDays":7}"#);
+    });
+    let _me = server.mock(|when, then| {
+        when.method(GET).path("/auth/me");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"user":{"email":"slot@example.com"}}"#);
+    });
+    let latest_body = format!(
+        r#"{{"success":true,"exists":true,"sha256":"{}","version":4,"id":"save-tekken","latestSizeBytes":131072}}"#,
+        sha
+    );
+    let _save_latest = server.mock(|when, then| {
+        when.method(GET).path("/save/latest");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(latest_body);
+    });
+    let _conflict_check = server.mock(|when, then| {
+        when.method(GET).path("/conflicts/check");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"exists":false}"#);
+    });
+    let upload = server.mock(|when, then| {
+        when.method(POST).path("/saves");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"success":true,"save":{"id":"save-tekken","sha256":"stored","version":5}}"#);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(root.join("saves/psx")).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let local = root.join("saves/psx/Tekken 3 (USA).srm");
+    fs::write(&local, &bytes).unwrap();
+    // This device last synced the save under the shared card, which is the
+    // live shape: the file now sits on a per-game card.
+    slot_state(&state_dir, &local, "psx", "Memory Card 1");
+    let config = writeback_config_for(&tmp, &server, &root, &state_dir, "psx");
+
+    wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("login")
+        .arg("--email")
+        .arg("slot@example.com")
+        .arg("--app-password")
+        .arg("pw")
+        .assert()
+        .success();
+    let output = wb_helper()
+        .arg("--config")
+        .arg(&config)
+        .arg("sync")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        upload.calls(),
+        1,
+        "the save was not re-offered under its new card, so the server still serves it from the old one:\n{stderr}"
     );
 }
