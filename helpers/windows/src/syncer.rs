@@ -3824,7 +3824,10 @@ fn process_single_save(
     let local_edited_since_sync = prior_local_sha
         .map(|prior| prior != local_sha.as_str())
         .unwrap_or(false);
-    if local_edited_since_sync {
+    // A save that moved cards is offered to the server even with unchanged
+    // bytes: the server moves it onto the line the new card names, and a
+    // download here would leave it served from the old card.
+    if local_edited_since_sync || moved_to_another_card {
         if options.dry_run {
             report.would_upload += 1;
             return Ok(Some(processed_entry(
