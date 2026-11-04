@@ -79,6 +79,11 @@ pub struct LatestSaveResponse {
     /// "no cross-ext check" (degrades to prior behavior).
     #[serde(default)]
     pub format: Option<String>,
+    /// The card the server holds the logical save on, when it reports one.
+    /// A server re-home leaves this different from the card being offered
+    /// while the bytes are unchanged, which local state cannot show.
+    #[serde(default, rename = "cardSlot")]
+    pub card_slot: Option<String>,
 }
 
 #[derive(Debug, Clone)]

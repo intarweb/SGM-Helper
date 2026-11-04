@@ -3383,6 +3383,7 @@ fn process_single_save(
                 sha256: None,
                 version: None,
                 id: None,
+                card_slot: None,
             }
         }
         Err(err) if is_missing_cloud_payload_reference(&err) => {
@@ -3397,6 +3398,7 @@ fn process_single_save(
                 sha256: None,
                 version: None,
                 id: None,
+                card_slot: None,
             }
         }
         Err(err) if is_playstation_projection_unavailable(&err, &system_slug) => {
@@ -3411,6 +3413,7 @@ fn process_single_save(
                 sha256: None,
                 version: None,
                 id: None,
+                card_slot: None,
             }
         }
         Err(err) => return Err(err),
@@ -3632,9 +3635,22 @@ fn process_single_save(
         .and_then(|entry| entry.slot_name.as_deref())
         .map(str::trim)
         .filter(|slot| !slot.is_empty());
+    // The device's own state is not the only witness to a move: the server can
+    // re-home a save (another device, a manual repair) and this device would
+    // still record the card it last synced. Compare the card the server reports
+    // as well, so an unchanged-bytes offer still uploads and the save lands on
+    // the card it names.
+    let server_slot = latest
+        .card_slot
+        .as_deref()
+        .map(str::trim)
+        .filter(|slot| !slot.is_empty());
     let moved_to_another_card = known_slot
         .map(|slot| !slot.eq_ignore_ascii_case(offered_slot))
-        .unwrap_or(false);
+        .unwrap_or(false)
+        || server_slot
+            .map(|slot| !slot.eq_ignore_ascii_case(offered_slot))
+            .unwrap_or(false);
     if latest.sha256.as_deref() == Some(local_sha.as_str()) && !moved_to_another_card {
         report.in_sync += 1;
         if verbose {
@@ -4333,6 +4349,7 @@ fn process_missing_save(
             sha256: None,
             version: None,
             id: None,
+            card_slot: None,
         },
         Err(err) => return Err(err),
     };
