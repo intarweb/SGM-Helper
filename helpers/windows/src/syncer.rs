@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use crate::api::{
     ApiClient, CloudSaveSummary, ConflictCheckResponse, LatestSaveContext, LatestSaveRequest,
-    LatestSaveResponse, RuntimeTarget, UploadedSave,
+    LatestSaveResponse, RuntimeTarget, UploadSaveResponse, UploadedSave,
 };
 use crate::backend_config::sync_config_with_backend;
 use crate::config::AppConfig;
@@ -2076,13 +2076,14 @@ fn process_psp_savedata_dir(
             None,
             Some(&save_dir),
         )?;
+        let Some(stored) = stored_save(response) else {
+            report_accepted_not_stored(report, dir);
+            return Ok(None);
+        };
         report.uploaded += 1;
         Ok(Some(entry_for(
             local_sha.clone(),
-            response
-                .save
-                .and_then(|save| save.version)
-                .or(latest.version),
+            stored.version.or(latest.version),
         )))
     };
 
@@ -2698,7 +2699,7 @@ fn process_single_save(
                 )));
             }
             let filename = upload_filename_for_sync(save_path, &system_slug);
-            api.upload_save(
+            let response = api.upload_save(
                 &filename,
                 normalized_save.canonical_bytes.clone(),
                 &active_rom_sha1,
@@ -2712,6 +2713,10 @@ fn process_single_save(
                 Some(&runtime_target),
                 None,
             )?;
+            if stored_save(response).is_none() {
+                report_accepted_not_stored(report, save_path);
+                return Ok(None);
+            }
             report.uploaded += 1;
             return Ok(Some(processed_entry(
                 state_key.clone(),
@@ -2756,7 +2761,7 @@ fn process_single_save(
                     );
                 }
                 let filename = upload_filename_for_sync(save_path, &system_slug);
-                api.upload_save(
+                let response = api.upload_save(
                     &filename,
                     normalized_save.canonical_bytes.clone(),
                     &active_rom_sha1,
@@ -2770,6 +2775,10 @@ fn process_single_save(
                     Some(&runtime_target),
                     None,
                 )?;
+                if stored_save(response).is_none() {
+                    report_accepted_not_stored(report, save_path);
+                    return Ok(None);
+                }
                 report.uploaded += 1;
                 return Ok(Some(processed_entry(
                     state_key.clone(),
@@ -2849,7 +2858,7 @@ fn process_single_save(
                     );
                 }
                 let filename = upload_filename_for_sync(save_path, &system_slug);
-                api.upload_save(
+                let response = api.upload_save(
                     &filename,
                     normalized_save.canonical_bytes.clone(),
                     &active_rom_sha1,
@@ -2863,6 +2872,10 @@ fn process_single_save(
                     Some(&runtime_target),
                     None,
                 )?;
+                if stored_save(response).is_none() {
+                    report_accepted_not_stored(report, save_path);
+                    return Ok(None);
+                }
                 report.uploaded += 1;
                 return Ok(Some(processed_entry(
                     state_key.clone(),
@@ -3968,9 +3981,27 @@ fn upload_with_n64_mister_cpk_fallback(
     // carries `id` and `sha256` and, on some paths, no `version` at all; reading
     // that as "nothing was stored" reported every such upload as accepted and
     // discarded while the record was on disk.
-    Ok(upload_response
+    Ok(stored_save(upload_response))
+}
+
+/// The save a successful upload response stored, or `None` when the body names
+/// none. A response that names a save (`version`, `id` or `sha256`) is a stored
+/// save: the server's success body carries `id` and `sha256` and, on some paths,
+/// no `version`. A 2xx with no `save` object stored nothing, and every upload
+/// path has to say so rather than count the request.
+fn stored_save(response: UploadSaveResponse) -> Option<UploadedSave> {
+    response
         .save
-        .filter(|save| save.version.is_some() || save.id.is_some() || save.sha256.is_some()))
+        .filter(|save| save.version.is_some() || save.id.is_some() || save.sha256.is_some())
+}
+
+/// A 2xx that stored nothing: counted and named, never counted as an upload.
+fn report_accepted_not_stored(report: &mut SyncReport, path: &std::path::Path) {
+    report.accepted_not_stored += 1;
+    eprintln!(
+        "Server accepted {} but returned no save; nothing was stored",
+        path.display()
+    );
 }
 
 fn should_retry_n64_mister_cpk_as_mpk(
