@@ -3089,6 +3089,24 @@ fn process_single_save(
             rom_stem, system_slug
         );
     }
+    // A PS1 card is named after its game, and the server keeps one line per
+    // card. A card whose name matches no ROM here (a title-named card a game
+    // or a converter wrote) opens a line of its own on the server, which then
+    // moves the game's save onto it and away from the game's card. Only an
+    // index that loaded can say a ROM is missing; with no ROM root the card
+    // syncs as before.
+    if rom_entry_for_rom.is_none()
+        && !rom_index.is_empty()
+        && canonical_server_system_slug(&system_slug) == "psx"
+        && infer_playstation_slot_from_path(save_path).starts_with(PS1_PER_GAME_SLOT_PREFIX)
+    {
+        report.skipped += 1;
+        eprintln!(
+            "Not uploading {}: a PS1 card named after no ROM in the index would open its own line on the server",
+            save_path.display()
+        );
+        return Ok(None);
+    }
     if !source_allows_system(source_systems, &system_slug) {
         report.skipped += 1;
         if verbose {
