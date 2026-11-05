@@ -1001,6 +1001,22 @@ pub fn classify_supported_save(
         );
     }
 
+    // A zipped ROM's extension names no system, but the folder a front end
+    // keeps it in can ("Sega Game Gear/Defenders of Oasis.zip"). Only a folder
+    // that names one Sega system counts, so a ROM under a generic folder
+    // still says nothing.
+    if let Some(slug) = rom_path.and_then(sega_system_from_rom_folder)
+        && is_plausible_save_for_system(&save_ext, save_size, slug)
+    {
+        return classify_if_valid(
+            save_path,
+            &save_ext,
+            save_size,
+            slug,
+            format!("rom folder + .{} ({} bytes)", save_ext, save_size),
+        );
+    }
+
     let save_lower = save_path.to_string_lossy().to_ascii_lowercase();
     if contains_any(
         &save_lower,
@@ -1360,6 +1376,33 @@ fn path_extension(path: &Path) -> Option<String> {
     path.extension()
         .and_then(|value| value.to_str())
         .map(|value| value.to_ascii_lowercase())
+}
+
+/// The Sega system a ROM's own folder names, for a ROM whose extension is a
+/// container (zip, 7z) and so names none.
+fn sega_system_from_rom_folder(rom_path: &Path) -> Option<&'static str> {
+    let ext = path_extension(rom_path)?;
+    if !matches!(ext.as_str(), "zip" | "7z") {
+        return None;
+    }
+    let folder = rom_path
+        .parent()?
+        .file_name()?
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    if contains_any(&folder, &["game gear", "gamegear"]) || folder == "gg" {
+        return Some("game-gear");
+    }
+    if contains_any(&folder, &["master system", "mastersystem", "mark iii"]) || folder == "sms" {
+        return Some("master-system");
+    }
+    if contains_any(&folder, &["32x"]) {
+        return Some("sega-32x");
+    }
+    if contains_any(&folder, &["mega drive", "megadrive", "genesis"]) || folder == "md" {
+        return Some("genesis");
+    }
+    None
 }
 
 fn system_slug_from_rom_extension(ext: String) -> Option<&'static str> {
@@ -3355,6 +3398,49 @@ mod tests {
         );
         let md = write_save(&dir, "Phantasy Star IV (USA).srm", 8192);
         let md_rom = tmp.path().join("roms/genesis/Phantasy Star IV (USA).md");
+        assert_eq!(
+            super::classify_supported_save(&md, Some(&md_rom)).map(|c| c.system_slug),
+            Some("genesis".to_string())
+        );
+    }
+
+    #[test]
+    fn a_zipped_rom_in_a_game_gear_folder_names_a_genesis_plus_gx_save() {
+        // The cabinet's RetroArch source indexes ROMs under LaunchBox's view,
+        // where the Game Gear ROM is a zip in "Sega Game Gear". Its save sits
+        // in Genesis Plus GX's folder or under RetroArch's genesis folder.
+        let tmp = tempfile::tempdir().unwrap();
+        let rom = tmp
+            .path()
+            .join("Views/LaunchBox/Sega Game Gear/Defenders of Oasis (USA, Europe).zip");
+        std::fs::create_dir_all(rom.parent().unwrap()).unwrap();
+        std::fs::write(&rom, b"PK").unwrap();
+        for dir in [
+            "RetroArch/saves/Genesis Plus GX",
+            "RetroArch/saves/genesis",
+            "RetroArchNightly/saves/genesis",
+        ] {
+            let save = write_save(
+                &tmp.path().join(dir),
+                "Defenders of Oasis (USA, Europe).srm",
+                65536,
+            );
+            assert_eq!(
+                super::classify_supported_save(&save, Some(&rom)).map(|c| c.system_slug),
+                Some("game-gear".to_string()),
+                "{dir}"
+            );
+        }
+        let md_rom = tmp
+            .path()
+            .join("Views/LaunchBox/Sega Genesis/Phantasy Star IV (USA).zip");
+        std::fs::create_dir_all(md_rom.parent().unwrap()).unwrap();
+        std::fs::write(&md_rom, b"PK").unwrap();
+        let md = write_save(
+            &tmp.path().join("RetroArch/saves/Genesis Plus GX"),
+            "Phantasy Star IV (USA).srm",
+            8192,
+        );
         assert_eq!(
             super::classify_supported_save(&md, Some(&md_rom)).map(|c| c.system_slug),
             Some("genesis".to_string())
