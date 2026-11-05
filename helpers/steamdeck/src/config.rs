@@ -106,10 +106,18 @@ impl AppConfig {
                 merged_overrides.secure = scheme_secure;
             }
             merged_overrides.api_url = None;
+            // The URL is resolved: drop its keys, or the call below finds the
+            // same API_URL in the environment or config.ini and recurses forever.
+            let mut env_values = env_values.clone();
+            let mut ini_values = ini_values.clone();
+            for key in ["ONE_RETRO_API_URL", "API_URL"] {
+                env_values.remove(key);
+                ini_values.remove(key);
+            }
             return AppConfig::from_sources(
                 &merged_overrides,
-                env_values,
-                ini_values,
+                &env_values,
+                &ini_values,
                 binary_dir,
                 config_path,
             );
@@ -563,6 +571,33 @@ SAVE_PATH="/home/snes9x/save"
         .unwrap();
         assert_eq!(cfg.base_url(), "https://saves.example.com:443");
         assert!(cfg.secure);
+    }
+
+    /// The API URL's port, explicit or implied by its scheme, wins over a PORT
+    /// set in the environment or config.ini.
+    #[test]
+    fn api_url_port_beats_port_from_env_and_ini() {
+        let cfg = test_sources(
+            ConfigOverrides {
+                api_url: Some("https://saves.example.com".to_string()),
+                ..Default::default()
+            },
+            &[("PORT", "9096")],
+            &[("PORT", "3001")],
+        )
+        .unwrap();
+        assert_eq!(cfg.base_url(), "https://saves.example.com:443");
+
+        let cfg = test_sources(
+            ConfigOverrides::default(),
+            &[
+                ("API_URL", "https://saves.example.com:8443"),
+                ("PORT", "9096"),
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(cfg.base_url(), "https://saves.example.com:8443");
     }
 
     #[test]
