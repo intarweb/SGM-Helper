@@ -1836,6 +1836,40 @@ mod tests {
     }
 
     #[test]
+    fn a_mister_source_defaults_to_ngp_virtualboy_and_neogeo_cd() {
+        // MiSTer has cores for all three and the scanner classifies their saves.
+        let defaults = parse_systems(None, &SourceKind::MisterFpga);
+        for slug in ["neogeo-cd", "ngp", "virtualboy"] {
+            assert!(
+                defaults.iter().any(|s| s == slug),
+                "{slug} missing from {defaults:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_systems_line_naming_ngp_virtualboy_and_neogeo_cd_keeps_them() {
+        // The server's policy names these three; they weren't known systems,
+        // so a SYSTEMS line naming them was dropped and nothing for them synced.
+        assert_eq!(
+            parse_systems(
+                Some(&"ngp,virtualboy,neogeo-cd".to_string()),
+                &SourceKind::RetroArch
+            ),
+            vec![
+                "neogeo-cd".to_string(),
+                "ngp".to_string(),
+                "virtualboy".to_string()
+            ]
+        );
+        assert_eq!(
+            normalize_system_slug("neogeocd").as_deref(),
+            Some("neogeo-cd")
+        );
+        assert_eq!(normalize_system_slug("vb").as_deref(), Some("virtualboy"));
+    }
+
+    #[test]
     fn helper_device_type_matches_backend_identity_names() {
         assert_eq!(SourceKind::MisterFpga.helper_device_type(), "mister");
         assert_eq!(SourceKind::SteamDeck.helper_device_type(), "steamdeck");
