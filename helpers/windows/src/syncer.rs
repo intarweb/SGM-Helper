@@ -2272,9 +2272,12 @@ fn process_single_save(
     // with a sha1 derived from the name when the server has no ROM, so asking it
     // first keys the save on that made-up sha1: /save/latest then misses the
     // record kept under the ROM's real sha1 and the save is uploaded every pass.
-    // The lookup is only for a save whose ROM is not on this device.
+    // The lookup is only for a save whose ROM is not on this device, or whose
+    // ROM is an archive: hashing a .zip or .7z gives the container's sha1, which
+    // no ROM record is keyed on, so those still ask the lookup.
     if rom_sha1.is_none()
         && let Some(rom_entry) = rom_entry
+        && !rom_is_archive(&rom_entry.path)
     {
         if let Some((cached_sha1, cached_md5)) = rom_hash_cache.get(&stem_key).cloned() {
             rom_sha1 = Some(cached_sha1);
@@ -3054,6 +3057,13 @@ fn latest_save_context(save_path: &Path, system_slug: &str) -> LatestSaveContext
 
 fn is_playstation_system(system_slug: &str) -> bool {
     matches!(system_slug, "psx" | "ps2")
+}
+
+fn rom_is_archive(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("7z"))
+        .unwrap_or(false)
 }
 
 fn is_dreamcast_system(system_slug: &str) -> bool {
