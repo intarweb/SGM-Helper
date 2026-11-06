@@ -1957,6 +1957,7 @@ mod tests {
             binary_dir: tmp.path().to_path_buf(),
             config_path: tmp.path().join("config.ini"),
             psp_savedata_bundles: false,
+            folder_save_bundles: false,
         }
     }
 
