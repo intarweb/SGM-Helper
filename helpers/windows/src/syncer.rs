@@ -784,6 +784,12 @@ fn restore_single_cloud_save(
 
     if !supports_cloud_restore_system(&system_slug) {
         report.skipped += 1;
+        if verbose {
+            eprintln!(
+                "{}",
+                unrestored_system_message(&system_slug, cloud_save.display_name())
+            );
+        }
         return Ok(());
     }
     if !source_allows_system(source_systems, &system_slug) {
@@ -1179,6 +1185,14 @@ fn restore_cloud_psp_bundle(
     }
 
     Ok(())
+}
+
+/// The line a verbose sync prints for a record of a system this helper never
+/// restores: without it the record is dropped with only a skipped count.
+fn unrestored_system_message(system_slug: &str, display_name: &str) -> String {
+    format!(
+        "Skipping cloud {system_slug} save '{display_name}': this helper does not restore {system_slug} saves"
+    )
 }
 
 fn supports_cloud_restore_system(system_slug: &str) -> bool {
@@ -5517,6 +5531,14 @@ mod tests {
 
     // The server's error text is `… status=<code> <reason> body=…`; the parse
     // has to take the code and decide on it, not on the reason phrase.
+    #[test]
+    fn an_unrestored_system_is_named_in_the_log() {
+        assert_eq!(
+            unrestored_system_message("psp", "Dissidia"),
+            "Skipping cloud psp save 'Dissidia': this helper does not restore psp saves"
+        );
+    }
+
     #[test]
     fn windows_restores_every_system_retroarch_runs_on_it() {
         // The cabinet's RetroArch runs these; a record another device uploaded
